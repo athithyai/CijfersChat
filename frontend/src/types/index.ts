@@ -82,7 +82,8 @@ export interface ChatState {
   currentPlan: MapPlan | null
   currentGeoJSON: ChoroplethFeatureCollection | null
   selectedRegion: SelectedRegion | null
-  isLoading: boolean
+  isLoading: boolean       // chat request in flight
+  isLayerLoading: boolean  // layer switch in flight (map stays interactive during chat)
   error: string | null
   sendMessage: (text: string) => Promise<void>
   selectRegion: (region: SelectedRegion | null) => void

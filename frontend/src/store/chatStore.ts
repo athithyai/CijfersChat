@@ -14,12 +14,32 @@ import type {
 let idCounter = 0
 const uid = () => `msg-${Date.now()}-${++idCounter}`
 
+// ── Greeting fast-path (instant response, no backend call) ────────────────────
+const _GREETINGS = new Set([
+  'hi', 'hello', 'hoi', 'hey', 'hallo', 'dag', 'yo', 'sup', 'howdy',
+  'goedemorgen', 'goedemiddag', 'goedenavond', 'good morning', 'good afternoon',
+])
+const _GREETING_REPLIES = [
+  'Hallo! Vraag me iets over Nederlandse regionale statistieken. Probeer: "Toon bevolkingsdichtheid per gemeente" of "WOZ-waarde per buurt in Amsterdam".',
+  'Hey! Ik maak interactieve kaarten van CBS-kerncijfers op gemeente-, wijk- en buurtniveau. Wat wil je weten?',
+  'Hi! Ask me about Dutch regional stats — housing values, population, income, or demographics. Type a question or pick an example.',
+  'Hoi! Ik laat CBS-statistieken op een kaart zien. Probeer: "Inkomen per wijk in Rotterdam" of "Vergelijk buurten in Utrecht".',
+]
+function _isGreeting(text: string): boolean {
+  const words = text.trim().toLowerCase().replace(/[!?.,]+$/, '').split(/\s+/)
+  return words.length <= 3 && words.some(w => _GREETINGS.has(w))
+}
+function _randomGreetingReply(): string {
+  return _GREETING_REPLIES[Math.floor(Math.random() * _GREETING_REPLIES.length)]
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   currentPlan: null,
   currentGeoJSON: null,
   selectedRegion: null,
   isLoading: false,
+  isLayerLoading: false,
   error: null,
 
   sendMessage: async (text: string) => {
@@ -46,8 +66,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const userMsg: Message = {
       id: uid(),
       role: 'user',
-      content: text,   // display the raw text, not the context-augmented version
+      content: text,
       timestamp: Date.now(),
+    }
+
+    // Fast-path: pure greeting → instant reply, no LLM call needed
+    if (_isGreeting(text)) {
+      const greetMsg: Message = {
+        id: uid(),
+        role: 'assistant',
+        content: _randomGreetingReply(),
+        timestamp: Date.now(),
+      }
+      set({ messages: [...messages, userMsg, greetMsg] })
+      return
     }
 
     set({ messages: [...messages, userMsg], isLoading: true, error: null })
@@ -118,33 +150,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Skip if already on this level
     if (currentPlan?.geography_level === level) return
 
-    set({ isLoading: true, error: null })
+    // Use isLayerLoading — keeps chat input enabled and map controls usable
+    set({ isLayerLoading: true, error: null })
 
     try {
-      // Scope: keep current municipality scope for wijk/buurt; clear for gemeente
       const scope = level === 'gemeente' ? null : (currentPlan?.region_scope ?? null)
-
-      // Fetch ONLY boundaries — no CBS data, no colours. Fast: cached after first use.
       const geojson = await api.boundaries(level, scope)
-
-      // Build a lightweight plan stub so MapControls shows the active level
       const newPlan = currentPlan
         ? { ...currentPlan, geography_level: level, region_scope: scope }
         : null
 
       set({
         currentPlan: newPlan,
-        // Boundaries have no meta/colours — MapPanel renders them as plain polygons
         currentGeoJSON: geojson as ChoroplethFeatureCollection,
         selectedRegion: null,
-        isLoading: false,
+        isLayerLoading: false,
       })
     } catch (err) {
       const detail =
         err instanceof ApiError ? err.message
         : err instanceof Error ? err.message
         : 'Layer switch failed.'
-      set({ isLoading: false, error: detail })
+      set({ isLayerLoading: false, error: detail })
     }
   },
 

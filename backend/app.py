@@ -210,6 +210,39 @@ def _extract_context_from_history(history: list[dict[str, str]]) -> dict | None:
     return None
 
 
+_CITY_TO_GM: dict[str, str] = {
+    "amsterdam": "GM0363", "rotterdam": "GM0599", "den haag": "GM0518",
+    "the hague": "GM0518", "utrecht": "GM0344", "eindhoven": "GM0772",
+    "groningen": "GM0014", "tilburg": "GM0855", "almere": "GM0034",
+    "breda": "GM0758", "nijmegen": "GM0268", "enschede": "GM0153",
+    "haarlem": "GM0392", "arnhem": "GM0202", "amersfoort": "GM0307",
+    "apeldoorn": "GM0200", "den bosch": "GM0796", "zwolle": "GM0193",
+    "leiden": "GM0546", "maastricht": "GM0935", "delft": "GM0503",
+    "dordrecht": "GM0505", "zoetermeer": "GM0637", "deventer": "GM0150",
+    "alkmaar": "GM0361", "leeuwarden": "GM0080", "venlo": "GM0983",
+}
+
+
+def _correct_region_scope(message: str, plan: "MapPlan") -> "MapPlan":
+    """Validate that region_scope matches city names mentioned in the message.
+
+    llama3.2 occasionally maps a city to the wrong GM code. This post-hoc
+    check overrides the scope when a known city is unambiguously mentioned.
+    """
+    lower = message.lower()
+    for city, code in _CITY_TO_GM.items():
+        if city not in lower:
+            continue
+        if plan.region_scope != code:
+            logger.warning(
+                "Correcting region_scope '%s' → '%s' (city '%s' found in message)",
+                plan.region_scope, code, city,
+            )
+            return plan.model_copy(update={"region_scope": code})
+        break   # city found and scope already correct — stop
+    return plan
+
+
 def _extract_top_regions(enriched: dict, n: int = 5) -> list[dict]:
     """Return the top N features by value from an enriched GeoJSON."""
     features = enriched.get("features", [])
@@ -401,25 +434,22 @@ async def chat_endpoint(body: ChatRequest):
         plan.region_scope, plan.intent,
     )
 
-    # Guard: verify measure_code exists in the chosen table
-    try:
-        valid_codes = {m["code"] for m in await get_measure_columns(plan.table_id)}
-        if valid_codes and plan.measure_code not in valid_codes:
-            fallback = _fallback_measure(plan.measure_code, valid_codes)
-            logger.warning(
-                "measure_code '%s' not in table %s; using '%s'",
-                plan.measure_code, plan.table_id, fallback,
-            )
-            plan = plan.model_copy(update={"measure_code": fallback})
-    except Exception as exc:
-        logger.warning("Could not validate measure_code: %s", exc)
+    # Correct region_scope against city names in the message (fixes model hallucinations)
+    plan = _correct_region_scope(body.message, plan)
 
     measure_label = _MEASURE_LABELS.get(plan.measure_code, plan.measure_code.replace("_", " "))
 
-    # ── Info intent: conversational only, no map ──────────────────────────────
+    # ── Info intent: conversational only, no map, no CBS validation ───────────
     if plan.intent == "info":
-        logger.info("Info intent — returning canned message")
-        reply = plan.message or _build_message(plan)
+        logger.info("Info intent — calling Narrator for natural reply")
+        reply = await generate_narration(
+            user_message=body.message,
+            plan=plan,
+            meta=None,
+            history=body.history,
+            measure_label=measure_label,
+            top_regions=None,
+        )
         return ChatResponse(
             message=reply,
             plan=plan,
@@ -445,7 +475,20 @@ async def chat_endpoint(body: ChatRequest):
             warnings=[],
         )
 
-    # ── Map choropleth: fetch CBS + PDOK + join, then narrate ─────────────────
+    # ── Map choropleth: validate measure, fetch CBS + PDOK + join, narrate ──────
+
+    # Only validate measure_code for map queries (skipped for info/explain)
+    try:
+        valid_codes = {m["code"] for m in await get_measure_columns(plan.table_id)}
+        if valid_codes and plan.measure_code not in valid_codes:
+            fallback = _fallback_measure(plan.measure_code, valid_codes)
+            logger.warning(
+                "measure_code '%s' not in table %s; using '%s'",
+                plan.measure_code, plan.table_id, fallback,
+            )
+            plan = plan.model_copy(update={"measure_code": fallback})
+    except Exception as exc:
+        logger.warning("Could not validate measure_code: %s", exc)
 
     # At gemeente level a GM scope would return only 1 polygon — not useful for
     # a choropleth. Fetch ALL gemeenten but keep region_scope in the plan so the

@@ -10,11 +10,11 @@ const LEVELS: { value: GeographyLevel; label: string; sublabel: string }[] = [
 ]
 
 export function MapControls() {
-  const currentPlan   = useChatStore(s => s.currentPlan)
+  const currentPlan    = useChatStore(s => s.currentPlan)
   const selectedRegion = useChatStore(s => s.selectedRegion)
-  const isLoading     = useChatStore(s => s.isLoading)
-  const switchLayer   = useChatStore(s => s.switchLayer)
-  const selectRegion  = useChatStore(s => s.selectRegion)
+  const isLayerLoading = useChatStore(s => s.isLayerLoading)
+  const switchLayer    = useChatStore(s => s.switchLayer)
+  const selectRegion   = useChatStore(s => s.selectRegion)
 
   const activeLevel = currentPlan?.geography_level ?? null
 
@@ -33,7 +33,7 @@ export function MapControls() {
         <div className="flex flex-col">
           {LEVELS.map(({ value, label, sublabel }) => {
             const isActive = activeLevel === value
-            const disabled = isLoading
+            const disabled = isLayerLoading
 
             return (
               <button
@@ -62,7 +62,7 @@ export function MapControls() {
                   </span>
                 </span>
 
-                {isActive && isLoading && (
+                {isActive && isLayerLoading && (
                   <span className="ml-auto w-3 h-3 border-2 border-brand-400 border-t-transparent
                                    rounded-full animate-spin shrink-0" />
                 )}
