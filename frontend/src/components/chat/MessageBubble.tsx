@@ -6,13 +6,14 @@ import { LoadingDots } from './LoadingDots'
 interface Props {
   message: Message
   isStreaming?: boolean
+  onRetry?: () => void
 }
 
 function formatTime(ts: number) {
   return new Intl.DateTimeFormat('nl-NL', { hour: '2-digit', minute: '2-digit' }).format(new Date(ts))
 }
 
-export function MessageBubble({ message, isStreaming }: Props) {
+export function MessageBubble({ message, isStreaming, onRetry }: Props) {
   const isUser   = message.role === 'user'
   const isError  = message.role === 'error'
   const isSystem = message.role === 'system'
@@ -65,6 +66,21 @@ export function MessageBubble({ message, isStreaming }: Props) {
         >
           {isStreaming ? (
             <LoadingDots />
+          ) : isError ? (
+            <div className="space-y-2">
+              <p className="whitespace-pre-wrap">{message.content}</p>
+              {onRetry && (
+                <button
+                  onClick={onRetry}
+                  className="text-xs font-medium px-2.5 py-1 rounded-md
+                             bg-red-100 dark:bg-red-900 hover:bg-red-200 dark:hover:bg-red-800
+                             text-red-700 dark:text-red-300 border border-red-200 dark:border-red-700
+                             transition-colors"
+                >
+                  ↺ Try again
+                </button>
+              )}
+            </div>
           ) : (
             <p className="whitespace-pre-wrap">{message.content}</p>
           )}

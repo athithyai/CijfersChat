@@ -15,7 +15,7 @@ class MapPlan(BaseModel):
     The LLM fills this; backend services execute it.
     """
 
-    intent: Literal["map_choropleth", "zoom", "compare", "info"] = "map_choropleth"
+    intent: Literal["map_choropleth", "zoom", "compare", "info", "explain"] = "map_choropleth"
     table_id: str = Field(..., description="CBS table ID, e.g. '86165NED'")
     measure_code: str = Field(..., description="CBS column name, e.g. 'AantalInwoners_5'")
     geography_level: Literal["gemeente", "wijk", "buurt"]

@@ -69,9 +69,14 @@ export function MessageList() {
 
   return (
     <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4 min-h-0">
-      {messages.map(msg => (
-        <MessageBubble key={msg.id} message={msg} />
-      ))}
+      {messages.map((msg, index) => {
+        let onRetry: (() => void) | undefined
+        if (msg.role === 'error') {
+          const prevUser = [...messages].slice(0, index).reverse().find(m => m.role === 'user')
+          if (prevUser) onRetry = () => sendMessage(prevUser.content)
+        }
+        return <MessageBubble key={msg.id} message={msg} onRetry={onRetry} />
+      })}
 
       {/* Loading bubble */}
       {isLoading && (

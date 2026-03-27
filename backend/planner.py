@@ -138,6 +138,26 @@ Use these mappings when the user's request matches a topic below:
   elderly / ouderen / 65+
       → k_65JaarOfOuder_12
 
+=== EXPLAIN INTENT ===
+Use intent = "explain" when the user asks to INTERPRET or UNDERSTAND the current map —
+not to load new data. Signals: "what does this mean?", "explain", "leg uit", "why is X
+so high/low?", "is that a lot?", "which buurt is richest/poorest?", "compare" (when no
+new geography or measure is requested).
+Keep all other plan fields identical to the current map context.
+
+Template for explain intent:
+{{
+  "intent": "explain",
+  "table_id": "{default_table}",
+  "measure_code": "AantalInwoners_5",
+  "geography_level": "gemeente",
+  "region_scope": null,
+  "period": null,
+  "classification": "quantile",
+  "n_classes": 5,
+  "message": ""
+}}
+
 === CONVERSATIONAL MESSAGES ===
 If the user is greeting, chatting, or asking what you can do (e.g. "hi", "hello",
 "goedemorgen", "what can you show me?", "help", "what data do you have?"), use intent = "info".
@@ -235,7 +255,7 @@ def _extract_json(text: str) -> dict[str, Any]:
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
 
-def _build_system_prompt(catalog: CatalogIndex) -> str:
+def _build_system_prompt(catalog: CatalogIndex, context: dict | None = None) -> str:
     gemeente_lines = "\n".join(
         f"  {name.title()}: {code}" for name, code in list(_GEMEENTE_CODES.items())[:20]
     )
@@ -245,12 +265,25 @@ def _build_system_prompt(catalog: CatalogIndex) -> str:
         f"  {t.id}: {t.short_title} ({t.period})" for t in priority_tables
     ) or f"  {settings.DEFAULT_TABLE}: Kerncijfers wijken en buurten (latest)"
 
-    return _SYSTEM_PROMPT.format(
+    prompt = _SYSTEM_PROMPT.format(
         tables_summary=tables_lines,
         default_table=settings.DEFAULT_TABLE,
         measures_summary=catalog.measures_summary(settings.DEFAULT_TABLE, max_items=25),
         gemeente_codes=gemeente_lines,
     )
+
+    if context:
+        scope_str = context.get("region_scope") or "null (all Netherlands)"
+        context_block = (
+            "\n=== CURRENT MAP CONTEXT (carry over unless user explicitly changes it) ===\n"
+            f"  table_id:         {context.get('table_id', settings.DEFAULT_TABLE)}\n"
+            f"  measure_code:     {context.get('measure_code', 'AantalInwoners_5')}\n"
+            f"  geography_level:  {context.get('geography_level', 'gemeente')}\n"
+            f"  region_scope:     {scope_str}\n"
+        )
+        prompt = context_block + "\n" + prompt
+
+    return prompt
 
 
 # ── Main public API ───────────────────────────────────────────────────────────
@@ -259,13 +292,14 @@ async def generate_plan(
     message: str,
     history: list[dict[str, str]],
     catalog: CatalogIndex,
+    context: dict | None = None,
 ) -> MapPlan:
     """Parse a natural-language message into a validated MapPlan.
 
     Retries once if the LLM output fails validation.
     """
     client = _make_client()
-    system_prompt = _build_system_prompt(catalog)
+    system_prompt = _build_system_prompt(catalog, context=context)
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
 
@@ -311,3 +345,109 @@ async def generate_plan(
 
     # Should never reach here
     raise RuntimeError("Unexpected planner state")
+
+
+async def generate_narration(
+    user_message: str,
+    plan: "MapPlan",
+    meta: dict | None,
+    history: list[dict[str, str]],
+    measure_label: str,
+    top_regions: list[dict] | None = None,
+) -> str:
+    """Generate a rich conversational reply after data has been fetched.
+
+    This is a second LLM call — separate from the planner — with higher
+    temperature for more natural language. Never raises: falls back to a
+    template string on any failure.
+
+    Parameters
+    ----------
+    user_message  : The original user question
+    plan          : The executed MapPlan
+    meta          : Join metadata (breaks, n_matched, n_total, period) or None
+    history       : Recent chat history (last 4 turns used)
+    measure_label : Human-readable measure name
+    top_regions   : Top-N regions by value (for highlighting interesting points)
+    """
+    client = _make_client()
+
+    # Language detection: use Dutch if any Dutch signal words are present
+    dutch_signals = {
+        "nederland", "dutch", "nl", "buurt", "wijk", "gemeente", "wat", "toon",
+        "laat", "gemiddeld", "per", "toon", "bereik", "vergelijk", "leg", "uit",
+        "waarom", "welke", "hoeveel", "veel", "weinig", "hoog", "laag",
+    }
+    lang = "Dutch" if any(w in user_message.lower().split() for w in dutch_signals) else "English"
+
+    # Build a compact data summary — kept under 200 tokens
+    data_lines: list[str] = []
+    if meta and meta.get("n_matched", 0) > 0:
+        n_matched = meta["n_matched"]
+        n_total   = meta.get("n_total", n_matched)
+        breaks    = meta.get("breaks", [])
+        period    = meta.get("period", "")
+
+        def _fmt(v: float) -> str:
+            if abs(v) >= 1_000_000: return f"{v / 1_000_000:.1f}M"
+            if abs(v) >= 1_000: return f"{v:,.0f}"
+            if v != int(v): return f"{v:.1f}"
+            return str(int(v))
+
+        if len(breaks) >= 2:
+            lo, hi = breaks[0], breaks[-1]
+            mid_idx = len(breaks) // 2
+            approx_median = breaks[mid_idx]
+            data_lines.append(f"Measure: {measure_label}")
+            data_lines.append(f"Level: {plan.geography_level}")
+            if plan.region_scope:
+                data_lines.append(f"Scope: {plan.region_scope}")
+            data_lines.append(f"Regions with data: {n_matched}/{n_total}")
+            data_lines.append(f"Range: {_fmt(lo)} – {_fmt(hi)}")
+            data_lines.append(f"Approx. median: {_fmt(approx_median)}")
+            if period:
+                data_lines.append(f"Reference period: {period}")
+            if top_regions:
+                region_str = ", ".join(
+                    f"{r['statnaam']} ({_fmt(r['value'])})"
+                    for r in top_regions[:5]
+                    if r.get("value") is not None
+                )
+                if region_str:
+                    data_lines.append(f"Highest values: {region_str}")
+
+    data_summary = "\n".join(data_lines) if data_lines else "No data statistics available."
+
+    system = (
+        f"You are a helpful Dutch regional statistics assistant. "
+        f"Respond in {lang}. Be conversational and insightful — 2 to 4 sentences. "
+        f"Highlight what is interesting or surprising. Do not just list every number. "
+        f"Do not repeat the user's question verbatim. Do not use bullet points or markdown.\n\n"
+        f"DATA CONTEXT:\n{data_summary}"
+    )
+
+    msgs: list[dict[str, str]] = [{"role": "system", "content": system}]
+    # Include only the last 4 turns — Narrator needs less context than Planner
+    for turn in history[-4:]:
+        if turn.get("role") in ("user", "assistant") and turn.get("content"):
+            msgs.append({"role": turn["role"], "content": turn["content"]})
+    msgs.append({"role": "user", "content": user_message})
+
+    try:
+        response = await client.chat.completions.create(
+            model=settings.LLM_MODEL,
+            messages=msgs,  # type: ignore[arg-type]
+            max_tokens=300,
+            temperature=0.7,
+        )
+        result = (response.choices[0].message.content or "").strip()
+        if result:
+            return result
+    except Exception as exc:
+        logger.warning("Narrator LLM call failed: %s", exc)
+
+    # Graceful fallback — never crashes
+    if data_lines:
+        range_line = next((l for l in data_lines if l.startswith("Range:")), "")
+        return f"{measure_label} per {plan.geography_level}. {range_line}".strip(" .")
+    return f"{measure_label} per {plan.geography_level}."

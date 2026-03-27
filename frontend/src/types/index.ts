@@ -4,7 +4,7 @@
 
 export type GeographyLevel = 'gemeente' | 'wijk' | 'buurt'
 export type Classification  = 'quantile' | 'jenks' | 'equal'
-export type Intent          = 'map_choropleth' | 'zoom' | 'compare' | 'info'
+export type Intent          = 'map_choropleth' | 'zoom' | 'compare' | 'info' | 'explain'
 
 export interface MapPlan {
   intent: Intent
