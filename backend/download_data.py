@@ -292,6 +292,50 @@ def download_geometry(year: int = _GEO_YEAR) -> bool:
         return False
 
 
+def compute_neighbors_spatial() -> bool:
+    """Compute gemeente adjacency via ST_Touches and store in gemeente_geo.duckdb.
+
+    Replaces the coordinate-hashing approximation in ingest.py with a proper
+    topological predicate.  Two municipalities are neighbors when their polygon
+    boundaries touch (share at least one point / segment).
+
+    Writes ``neighbors_gemeente (statcode_a TEXT, statcode_b TEXT)`` to
+    gemeente_geo.duckdb.  Returns True on success.
+    """
+    if not _GEO_DB_PATH.exists():
+        logger.warning("gemeente_geo.duckdb not found — run download_geometry() first")
+        return False
+
+    logger.info("Computing gemeente neighbors with ST_Touches …")
+
+    try:
+        db = duckdb.connect(str(_GEO_DB_PATH))
+        db.execute("LOAD spatial")
+
+        db.execute("DROP TABLE IF EXISTS neighbors_gemeente")
+        db.execute("""
+            CREATE TABLE neighbors_gemeente AS
+            SELECT a.statcode AS statcode_a,
+                   b.statcode AS statcode_b
+            FROM   gemeente_geo a,
+                   gemeente_geo b
+            WHERE  a.statcode < b.statcode
+              AND  ST_Touches(a.geom, b.geom)
+        """)
+
+        count = db.execute("SELECT COUNT(*) FROM neighbors_gemeente").fetchone()[0]
+        db.execute("CREATE INDEX IF NOT EXISTS idx_nb_a ON neighbors_gemeente(statcode_a)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_nb_b ON neighbors_gemeente(statcode_b)")
+        db.close()
+
+        logger.info("neighbors_gemeente: %d pairs written to gemeente_geo.duckdb", count)
+        return count > 0
+
+    except Exception as exc:
+        logger.warning("Neighbor computation failed: %s", exc)
+        return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download CBS data to DuckDB")
     parser.add_argument("--tables", nargs="+", metavar="ID", help="Specific table IDs")
@@ -327,11 +371,12 @@ def main() -> None:
     logger.info("")
     logger.info("Stats: %d OK, %d failed. cijfers.duckdb: %.1f MB", ok, fail, size_mb)
 
-    # Geometry download
+    # Geometry + neighbors
     if not args.no_geo:
         logger.info("")
         geo_ok = download_geometry(year=args.geo_year)
         if geo_ok:
+            compute_neighbors_spatial()
             geo_mb = _GEO_DB_PATH.stat().st_size / 1_048_576 if _GEO_DB_PATH.exists() else 0
             logger.info("Geometry: gemeente_geo.duckdb %.1f MB", geo_mb)
         else:

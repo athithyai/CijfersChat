@@ -422,9 +422,31 @@ def list_local_tables() -> list[str]:
 def get_neighbors_local(statcode: str, level: str) -> list[str]:
     """Return neighbor statcodes from the pre-computed adjacency table.
 
-    Returns an empty list when cbs_spatial.duckdb is not available or the
-    neighbors table does not yet contain data for this level.
+    Priority:
+    1. ST_Touches result in gemeente_geo.duckdb (accurate topological adjacency)
+    2. Coordinate-hashing result in cbs_spatial.duckdb (legacy fallback)
+
+    Returns an empty list when neither source is available.
     """
+    # 1. Spatial ST_Touches neighbors (gemeente only — that's all we store geometry for)
+    if level == "gemeente":
+        geo = _get_geo_conn()
+        if geo is not None:
+            try:
+                rows = geo.execute(
+                    """
+                    SELECT statcode_b FROM neighbors_gemeente WHERE statcode_a = ?
+                    UNION ALL
+                    SELECT statcode_a FROM neighbors_gemeente WHERE statcode_b = ?
+                    """,
+                    [statcode, statcode],
+                ).fetchall()
+                if rows:
+                    return [r[0] for r in rows]
+            except Exception as exc:
+                logger.debug("ST_Touches neighbors lookup failed: %s", exc)
+
+    # 2. Fall back to coordinate-hashing result in cbs_spatial.duckdb
     conn = _get_spatial_conn()
     if conn is None:
         return []
