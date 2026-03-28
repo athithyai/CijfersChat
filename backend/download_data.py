@@ -1,4 +1,4 @@
-"""Download CBS regional statistics CSVs into a local DuckDB database.
+"""Download CBS regional statistics CSVs + gemeente boundaries into DuckDB.
 
 Covers all 12 CBS categories shown on the data portal:
   Bevolking, Wonen en vastgoed, Energie, Onderwijs, Arbeid, Inkomen,
@@ -8,11 +8,15 @@ Covers all 12 CBS categories shown on the data portal:
 Usage
 -----
     cd backend
-    python download_data.py              # download all tables
+    python download_data.py              # download stats + geometry
+    python download_data.py --no-geo     # skip geometry download
     python download_data.py --tables 86165NED 85984NED
     python download_data.py --list       # show locally stored tables
 
-Output: data/cijfers.duckdb
+Output
+------
+  data/cijfers.duckdb      — long-format CBS statistics (existing)
+  data/gemeente_geo.duckdb — gemeente polygon geometry (from CBS GeoPackage)
 
 CBS CSV format
 --------------
@@ -22,6 +26,12 @@ The bulk endpoint returns a ZIP containing Observations.csv (long format):
   and WijkenEnBuurten = region code (e.g. 'GM0344', 'WK034400', 'BU03440000')
 
 MeasureCodes.csv inside the same ZIP provides Identifier→Title mapping.
+
+CBS GeoPackage
+--------------
+CBS publishes annual gemeente boundary files:
+  https://download.cbs.nl/regionale-kaarten/gem_{year}_v1.zip
+  → gem_{year}_v1.gpkg  (WGS84, statcode=GM####, statnaam, geometry)
 """
 from __future__ import annotations
 
@@ -46,9 +56,14 @@ logger = logging.getLogger(__name__)
 # ── CBS bulk CSV endpoint ──────────────────────────────────────────────────────
 _CSV_BASE = "https://datasets.cbs.nl/csv/CBS/nl"
 
-# ── Output DuckDB path ─────────────────────────────────────────────────────────
-_DATA_DIR = Path(__file__).parent / "data"
-_DB_PATH = _DATA_DIR / "cijfers.duckdb"
+# ── Output paths ──────────────────────────────────────────────────────────────
+_DATA_DIR    = Path(__file__).parent / "data"
+_DB_PATH     = _DATA_DIR / "cijfers.duckdb"
+_GEO_DB_PATH = _DATA_DIR / "gemeente_geo.duckdb"
+
+# CBS gebiedsindelingen GeoPackage — multi-year (2016–present), all gemeente boundaries
+_GEO_URL = "https://geodata.cbs.nl/files/Gebiedsindelingen/cbsgebiedsindelingen2016_heden.zip"
+_GEO_YEAR = 2024
 
 # ── Tables to download ─────────────────────────────────────────────────────────
 # Kerncijfers tables cover ALL 12 CBS categories in one table.
@@ -188,10 +203,101 @@ def list_local(db: duckdb.DuckDBPyConnection) -> None:
         print("No metadata found -- run download_data.py first.")
 
 
+def download_geometry(year: int = _GEO_YEAR) -> bool:
+    """Load gemeente polygon geometry into gemeente_geo.duckdb.
+
+    Reads the PDOK GeoJSON disk cache (data/geometry/gemeente_raw.json) that the
+    app already writes on first startup — no extra download needed.  Uses DuckDB
+    spatial ``ST_GeomFromGeoJSON()`` to store polygons as native GEOMETRY.
+
+    The result is a ``gemeente_geo`` table::
+
+        statcode TEXT, statnaam TEXT, jaarcode INTEGER, geom GEOMETRY
+
+    Returns True on success.
+    """
+    import json as _json
+
+    geom_dir = _DATA_DIR / "geometry"
+    cache_path = geom_dir / "gemeente_raw.json"
+
+    if not cache_path.exists():
+        logger.warning(
+            "   %s not found. Start the backend once so it fetches gemeente geometry from PDOK, "
+            "then re-run this script.", cache_path
+        )
+        return False
+
+    logger.info("Loading gemeente geometry from disk cache: %s", cache_path)
+    features = _json.loads(cache_path.read_text(encoding="utf-8"))
+    logger.info("   %d raw features loaded", len(features))
+
+    # Filter to requested year
+    year_features = [
+        f for f in features
+        if f.get("properties", {}).get("jaarcode") == year
+    ]
+    if not year_features:
+        # Fall back to latest available year
+        jaarcodes = [f["properties"]["jaarcode"] for f in features if f.get("properties", {}).get("jaarcode")]
+        if jaarcodes:
+            latest = max(jaarcodes)
+            year_features = [f for f in features if f.get("properties", {}).get("jaarcode") == latest]
+            logger.info("   Year %d not found — using %d (%d features)", year, latest, len(year_features))
+        else:
+            year_features = features
+            logger.info("   No jaarcode found — using all %d features", len(year_features))
+
+    try:
+        db = duckdb.connect(str(_GEO_DB_PATH))
+        db.execute("INSTALL spatial")
+        db.execute("LOAD spatial")
+
+        db.execute("DROP TABLE IF EXISTS gemeente_geo")
+        db.execute("""
+            CREATE TABLE gemeente_geo (
+                statcode TEXT NOT NULL,
+                statnaam TEXT,
+                jaarcode INTEGER,
+                geom     GEOMETRY
+            )
+        """)
+
+        inserted = 0
+        for f in year_features:
+            props    = f.get("properties") or {}
+            statcode = str(props.get("statcode", "")).strip().upper()
+            statnaam = str(props.get("statnaam", "")).strip()
+            jaarcode = props.get("jaarcode")
+            geom     = f.get("geometry")
+            if not statcode or geom is None:
+                continue
+            try:
+                db.execute(
+                    "INSERT INTO gemeente_geo VALUES (?, ?, ?, ST_GeomFromGeoJSON(?))",
+                    [statcode, statnaam, jaarcode, _json.dumps(geom)],
+                )
+                inserted += 1
+            except Exception as exc:
+                logger.debug("   Skip %s: %s", statcode, exc)
+
+        db.execute("CREATE INDEX IF NOT EXISTS idx_gg_statcode ON gemeente_geo(statcode)")
+        db.close()
+
+        logger.info("   gemeente_geo: %d features written to %s", inserted, _GEO_DB_PATH)
+        return inserted > 0
+
+    except Exception as exc:
+        logger.warning("   DuckDB spatial write failed: %s", exc)
+        return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download CBS data to DuckDB")
     parser.add_argument("--tables", nargs="+", metavar="ID", help="Specific table IDs")
     parser.add_argument("--list", action="store_true", help="List stored tables and exit")
+    parser.add_argument("--no-geo", action="store_true", help="Skip geometry download")
+    parser.add_argument("--geo-year", type=int, default=_GEO_YEAR, help="Boundary year (default: %(default)s)")
     args = parser.parse_args()
 
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -219,7 +325,18 @@ def main() -> None:
     db.close()
     size_mb = _DB_PATH.stat().st_size / 1_048_576 if _DB_PATH.exists() else 0
     logger.info("")
-    logger.info("Done -- %d OK, %d failed. DuckDB: %.1f MB at %s", ok, fail, size_mb, _DB_PATH)
+    logger.info("Stats: %d OK, %d failed. cijfers.duckdb: %.1f MB", ok, fail, size_mb)
+
+    # Geometry download
+    if not args.no_geo:
+        logger.info("")
+        geo_ok = download_geometry(year=args.geo_year)
+        if geo_ok:
+            geo_mb = _GEO_DB_PATH.stat().st_size / 1_048_576 if _GEO_DB_PATH.exists() else 0
+            logger.info("Geometry: gemeente_geo.duckdb %.1f MB", geo_mb)
+        else:
+            logger.warning("Geometry download failed — app will fall back to PDOK API")
+
     if ok > 0:
         logger.info("Backend will use local data (falls back to CBS OData if measure not found).")
 

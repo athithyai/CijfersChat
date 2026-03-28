@@ -22,6 +22,7 @@ When data is not available locally, returns None → cbs_client falls back to OD
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -34,10 +35,12 @@ logger = logging.getLogger(__name__)
 
 _DB_PATH         = Path(__file__).parent / "data" / "cijfers.duckdb"
 _SPATIAL_DB_PATH = Path(__file__).parent / "data" / "cbs_spatial.duckdb"
+_GEO_DB_PATH     = Path(__file__).parent / "data" / "gemeente_geo.duckdb"
 
 # Singleton read-only connections
 _conn: duckdb.DuckDBPyConnection | None = None
 _spatial_conn: duckdb.DuckDBPyConnection | None = None
+_geo_conn: duckdb.DuckDBPyConnection | None = None  # spatial ext loaded, for geometry queries
 
 
 # ── Static OData → CSV Identifier mapping ─────────────────────────────────────
@@ -166,6 +169,42 @@ def invalidate_spatial_conn() -> None:
         except Exception:
             pass
         _spatial_conn = None
+
+
+def _get_geo_conn() -> duckdb.DuckDBPyConnection | None:
+    """Read-only connection to gemeente_geo.duckdb with the spatial extension loaded.
+
+    Separate file from cbs_spatial.duckdb so writes during ingest never conflict
+    with the read-only stats/regions singleton.
+    """
+    global _geo_conn
+    if _geo_conn is not None:
+        if not _GEO_DB_PATH.exists():
+            _geo_conn = None
+            return None
+        return _geo_conn
+    if not _GEO_DB_PATH.exists():
+        return None
+    try:
+        conn = duckdb.connect(str(_GEO_DB_PATH), read_only=True)
+        conn.execute("LOAD spatial")
+        _geo_conn = conn
+        logger.info("Geometry DuckDB connected (spatial ext loaded): %s", _GEO_DB_PATH)
+    except Exception as exc:
+        logger.warning("Could not open geometry DuckDB: %s", exc)
+        _geo_conn = None
+    return _geo_conn
+
+
+def invalidate_geo_conn() -> None:
+    """Force reconnect on next geometry query (call after ingest rebuild)."""
+    global _geo_conn
+    if _geo_conn is not None:
+        try:
+            _geo_conn.close()
+        except Exception:
+            pass
+        _geo_conn = None
 
 
 def is_available() -> bool:
@@ -512,6 +551,68 @@ def get_observations_spatial(
         geography_level, measure_code, region_scope, len(df),
     )
     return df
+
+
+def get_geometries_local(geo_level: str) -> list[dict] | None:
+    """Return all gemeente features from the local DuckDB geometry table.
+
+    Returns a list of raw GeoJSON feature dicts (same format as the disk cache
+    used by ``spatial_service``) so all existing Python filters apply unchanged.
+    Returns ``None`` when the table is unavailable or empty.
+
+    Only ``geo_level='gemeente'`` is supported; wijk/buurt return ``None`` and
+    fall through to the PDOK / disk-cache path.
+    """
+    if geo_level != "gemeente":
+        return None
+
+    conn = _get_geo_conn()
+    if conn is None:
+        return None
+
+    # Fast existence check
+    try:
+        conn.execute("SELECT 1 FROM gemeente_geo LIMIT 1")
+    except Exception:
+        return None  # Table doesn't exist yet
+
+    sql = """
+        SELECT statcode, statnaam, jaarcode, ST_AsGeoJSON(geom) AS geom_json
+        FROM gemeente_geo
+    """
+    try:
+        rows = conn.execute(sql).fetchall()
+    except Exception as exc:
+        logger.debug("get_geometries_local query failed: %s", exc)
+        return None
+
+    if not rows:
+        return None
+
+    features: list[dict] = []
+    for statcode, statnaam, jaarcode, geom_json in rows:
+        if not geom_json:
+            continue
+        try:
+            geom = json.loads(geom_json)
+        except Exception:
+            continue
+        features.append({
+            "type": "Feature",
+            "properties": {
+                "statcode": statcode,
+                "statnaam": statnaam,
+                "gm_code":  "",        # gemeente level has no parent gm_code
+                "jaarcode": jaarcode,
+            },
+            "geometry": geom,
+        })
+
+    if not features:
+        return None
+
+    logger.info("Geometry DuckDB HIT: %d gemeente features", len(features))
+    return features
 
 
 def get_ingest_status() -> dict[str, Any] | None:

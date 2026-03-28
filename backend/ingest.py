@@ -33,9 +33,10 @@ settings = get_settings()
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-_DATA_DIR  = Path(__file__).parent / "data"
-_GEOM_DIR  = _DATA_DIR / "geometry"
-_DB_PATH   = _DATA_DIR / "cbs_spatial.duckdb"
+_DATA_DIR   = Path(__file__).parent / "data"
+_GEOM_DIR   = _DATA_DIR / "geometry"
+_DB_PATH    = _DATA_DIR / "cbs_spatial.duckdb"
+_GEO_DB_PATH = _DATA_DIR / "gemeente_geo.duckdb"   # separate file — avoids DuckDB read/write lock conflict
 
 _PROVINCE_MAP_PATH = _GEOM_DIR / "province_gm_map.json"
 
@@ -464,6 +465,83 @@ def _write_db(
         conn.close()
 
 
+# ── Geometry writer (DuckDB spatial) ──────────────────────────────────────────
+
+def _write_geometry_db(
+    gemeente_features: list[dict],
+    regions_df: pd.DataFrame,
+) -> int:
+    """Store gemeente polygon geometry in cbs_spatial.duckdb.
+
+    Creates (or replaces) the ``gemeente_geo`` table::
+
+        statcode TEXT, statnaam TEXT, province TEXT, jaarcode INTEGER, geom GEOMETRY
+
+    Requires the DuckDB spatial extension (installed automatically on first run).
+    Returns the number of rows inserted.
+    """
+    # Build statcode → province lookup from the already-built regions table
+    province_map: dict[str, str] = {}
+    if not regions_df.empty and {"statcode", "level", "province"}.issubset(regions_df.columns):
+        gm_rows = regions_df[regions_df["level"] == "gemeente"]
+        for _, row in gm_rows.iterrows():
+            sc = str(row["statcode"]).strip().upper()
+            prov = str(row.get("province", "")).strip()
+            if sc:
+                province_map[sc] = prov
+
+    # Write to a SEPARATE file so the read-only cbs_spatial.duckdb singleton is never blocked
+    conn = duckdb.connect(str(_GEO_DB_PATH))
+    try:
+        # Install + load spatial extension (idempotent; installs to ~/.duckdb/extensions/)
+        conn.execute("INSTALL spatial")
+        conn.execute("LOAD spatial")
+
+        conn.execute("DROP TABLE IF EXISTS gemeente_geo")
+        conn.execute("""
+            CREATE TABLE gemeente_geo (
+                statcode TEXT NOT NULL,
+                statnaam TEXT,
+                province TEXT,
+                jaarcode INTEGER,
+                geom     GEOMETRY
+            )
+        """)
+
+        inserted = 0
+        for f in gemeente_features:
+            props    = f.get("properties") or {}
+            statcode = str(props.get("statcode", "")).strip().upper()
+            statnaam = str(props.get("statnaam", "")).strip()
+            jaarcode = props.get("jaarcode")
+            geom     = f.get("geometry")
+            if not statcode or geom is None:
+                continue
+
+            province  = province_map.get(statcode, "")
+            geom_json = json.dumps(geom)
+            try:
+                conn.execute(
+                    "INSERT INTO gemeente_geo VALUES (?, ?, ?, ?, ST_GeomFromGeoJSON(?))",
+                    [statcode, statnaam, province, jaarcode, geom_json],
+                )
+                inserted += 1
+            except Exception as exc:
+                logger.warning("gemeente_geo: skip %s — %s", statcode, exc)
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gg_statcode ON gemeente_geo(statcode)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gg_province ON gemeente_geo(province)")
+
+        logger.info("gemeente_geo: %d features written to cbs_spatial.duckdb", inserted)
+        return inserted
+
+    except Exception as exc:
+        logger.error("_write_geometry_db failed: %s", exc)
+        return 0
+    finally:
+        conn.close()
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 async def run_ingest(year: int | None = None) -> dict[str, Any]:
@@ -595,6 +673,22 @@ async def run_ingest(year: int | None = None) -> dict[str, Any]:
         counts = await asyncio.to_thread(
             _write_db, regions_df, neighbors_by_level, stats_by_level, started_at
         )
+
+        # ── Step 7: Write gemeente polygon geometry ────────────────────────────
+        gem_features = features_by_level.get("gemeente", [])
+        if gem_features:
+            _status["progress"] = "Writing gemeente geometry (DuckDB spatial) …"
+            n_geom = await asyncio.to_thread(_write_geometry_db, gem_features, regions_df)
+            counts["gemeente_geo"] = n_geom
+            logger.info("gemeente_geo: %d features", n_geom)
+
+        # Invalidate read-only connections so the next query picks up the new DB
+        try:
+            from duckdb_client import invalidate_spatial_conn, invalidate_geo_conn
+            invalidate_spatial_conn()
+            invalidate_geo_conn()
+        except Exception as exc:
+            logger.debug("Connection invalidation skipped: %s", exc)
 
         _status.update({
             "status":       "done",

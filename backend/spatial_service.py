@@ -399,9 +399,16 @@ async def get_geometries(
             f"Unknown geography level: {geo_level!r}. Use gemeente / wijk / buurt."
         )
 
-    # Priority: 1) in-memory cache  2) disk JSON  3) PDOK live fetch
+    # Priority: 0) DuckDB local  1) in-memory cache  2) disk JSON  3) PDOK live fetch
     full_cache_key = make_key("geom_full", geo_level)
-    features: list[dict] | None = cache_get(geometry_cache, full_cache_key)
+
+    # Fast path: local DuckDB geometry table (no disk I/O or PDOK call needed)
+    features: list[dict] | None = duckdb_client.get_geometries_local(geo_level)
+    if features is not None:
+        logger.info("Geometry DuckDB HIT: %d %s features", len(features), geo_level)
+
+    if features is None:
+        features = cache_get(geometry_cache, full_cache_key)
 
     if features is None:
         # Try loading from disk first (persists across server restarts)
