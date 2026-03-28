@@ -345,7 +345,7 @@ Data: [CBS StatLine](https://opendata.cbs.nl) · [PDOK](https://pdok.nl) — CC 
 
 <div align="center">
 
-Built for open Dutch data
+Built for open Dutch data with ❤️
 
 [CBS StatLine](https://opendata.cbs.nl) · [PDOK](https://pdok.nl) · [MapLibre GL](https://maplibre.org) · [FastAPI](https://fastapi.tiangolo.com) · [DuckDB](https://duckdb.org)
 
