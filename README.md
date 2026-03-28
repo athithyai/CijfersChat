@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🗺️ CijfersChat
+<img src="frontend/public/favicon.svg" width="80" height="80" alt="CijfersChat logo" />
+
+# CijfersChat
 
 ### Chat with Dutch regional statistics — on a live map
 
