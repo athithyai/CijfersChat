@@ -23,7 +23,7 @@ export function MapLegend({ meta, measureCode }: Props) {
                     backdrop-blur-sm rounded-xl shadow-lg border border-gray-200
                     dark:border-gray-700 p-3 min-w-[160px] animate-fade-in">
       {/* Title */}
-      <p className="text-xs font-semibold text-gray-600 dark:text-gray-400 mb-2 truncate max-w-[150px]">
+      <p className="font-display text-xs font-medium mb-2 truncate max-w-[150px]" style={{ color: '#271D6C' }}>
         {measureCode}
       </p>
 

@@ -3,6 +3,7 @@
 import { create } from 'zustand'
 import { api, ApiError } from '../api/client'
 import type {
+  ChartDataPoint,
   ChatState,
   ChoroplethFeatureCollection,
   GeographyLevel,
@@ -16,15 +17,40 @@ const uid = () => `msg-${Date.now()}-${++idCounter}`
 
 // ── Greeting fast-path (instant response, no backend call) ────────────────────
 const _GREETINGS = new Set([
+  // Dutch
   'hi', 'hello', 'hoi', 'hey', 'hallo', 'dag', 'yo', 'sup', 'howdy',
   'goedemorgen', 'goedemiddag', 'goedenavond', 'good morning', 'good afternoon',
+  // Casual / slang
+  'wasup', 'wassup', 'heya', 'hiya', 'yo',
+  // Laughs / reactions (not a real question)
+  'haha', 'hahaha', 'lol', 'lmao', 'rofl', 'xd', ':)', ':d', '😂', '😄', '😊',
+  // Exclamations
+  'wow', 'wauw', 'whoa', 'woah', 'omg', 'wtf', 'damn', 'tof', 'gaaf',
+  'interessant', 'interesting', 'echt', 'serieus',
+  // Thanks / acknowledgements
+  'ok', 'oke', 'oks', 'thanks', 'thx', 'bedankt', 'dankjewel', 'dank',
+  'cool', 'nice', 'great', 'awesome', 'perfect', 'mooi', 'goed', 'top',
 ])
-const _GREETING_REPLIES = [
-  'Hallo! Vraag me iets over Nederlandse regionale statistieken. Probeer: "Toon bevolkingsdichtheid per gemeente" of "WOZ-waarde per buurt in Amsterdam".',
-  'Hey! Ik maak interactieve kaarten van CBS-kerncijfers op gemeente-, wijk- en buurtniveau. Wat wil je weten?',
-  'Hi! Ask me about Dutch regional stats — housing values, population, income, or demographics. Type a question or pick an example.',
-  'Hoi! Ik laat CBS-statistieken op een kaart zien. Probeer: "Inkomen per wijk in Rotterdam" of "Vergelijk buurten in Utrecht".',
+const _CASUAL_REPLIES = [
+  'Ha! Vraag me iets over Nederlandse statistieken — bijv. "Gasverbruik per gemeente" of "Bevolkingsdichtheid in Amsterdam".',
+  'Haha 😄 Kom maar op met een vraag over CBS-data. Probeer: "WOZ-waarde per gemeente in Utrecht".',
+  '😄 Ik ben er klaar voor. Stel een vraag over Nederlandse regionale cijfers!',
 ]
+const _GREETING_REPLIES = [
+  'Hallo! Vraag me iets over Nederlandse regionale statistieken. Probeer: "Bevolkingsdichtheid per gemeente" of "WOZ-waarde in Amsterdam".',
+  'Hey! Ik maak interactieve kaarten van CBS-kerncijfers per gemeente. Wat wil je weten?',
+  'Hi! Ask me about Dutch regional stats — housing values, population, income, or demographics per municipality. Type a question or pick an example.',
+  'Hoi! Ik laat CBS-statistieken op een kaart zien. Probeer: "Inkomen per gemeente" of "Vergelijk Amsterdam met omliggende gemeenten".',
+]
+function _isCasual(text: string): boolean {
+  const clean = text.trim().toLowerCase().replace(/[!?.,\s]+$/, '')
+  // Pure laugh / emoji / casual acknowledgement (up to 4 words)
+  const words = clean.split(/\s+/)
+  if (words.length <= 4 && words.every(w => _GREETINGS.has(w))) return true
+  // Pure emoji or single punctuation
+  if (/^[\p{Emoji}\s!?.:;,]+$/u.test(clean)) return true
+  return false
+}
 function _isGreeting(text: string): boolean {
   const words = text.trim().toLowerCase().replace(/[!?.,]+$/, '').split(/\s+/)
   return words.length <= 3 && words.some(w => _GREETINGS.has(w))
@@ -40,6 +66,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   selectedRegion: null,
   isLoading: false,
   isLayerLoading: false,
+  flyToStatcode: null,
   error: null,
 
   sendMessage: async (text: string) => {
@@ -60,7 +87,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Append selected region context to the message if one is active
     const contextualText = selectedRegion
-      ? `${text}\n[Selected region: ${selectedRegion.statnaam} (${selectedRegion.statcode})]`
+      ? `${text}\n[Selected region: ${selectedRegion.statnaam} (${selectedRegion.statcode}${selectedRegion.gm_code ? `, parent: ${selectedRegion.gm_code}` : ''})]`
       : text
 
     const userMsg: Message = {
@@ -70,12 +97,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       timestamp: Date.now(),
     }
 
-    // Fast-path: pure greeting → instant reply, no LLM call needed
-    if (_isGreeting(text)) {
+    // Fast-path: greeting or casual reaction → instant reply, no LLM call needed
+    if (_isGreeting(text) || _isCasual(text)) {
+      const replies = _isGreeting(text) ? _GREETING_REPLIES : _CASUAL_REPLIES
       const greetMsg: Message = {
         id: uid(),
         role: 'assistant',
-        content: _randomGreetingReply(),
+        content: replies[Math.floor(Math.random() * replies.length)],
         timestamp: Date.now(),
       }
       set({ messages: [...messages, userMsg, greetMsg] })
@@ -87,12 +115,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const response = await api.chat({ message: contextualText, history })
 
+      // Build chart data from top-10 regions by value (choropleth only)
+      let chartData: ChartDataPoint[] | undefined
+      const features = response.geojson?.features ?? []
+      if (features.length > 0 && response.geojson?.meta) {
+        const sorted = features
+          .filter(f => f.properties.value != null)
+          .sort((a, b) => (b.properties.value as number) - (a.properties.value as number))
+          .slice(0, 10)
+        if (sorted.length > 0) {
+          chartData = sorted.map(f => ({
+            name: f.properties.statnaam,
+            value: f.properties.value as number,
+            label: f.properties.label ?? String(f.properties.value),
+            color: f.properties.color ?? '#00A1CD',
+          }))
+        }
+      }
+
       const assistantMsg: Message = {
         id: uid(),
         role: 'assistant',
         content: response.message,
         plan: response.plan,
+        chartData,
         warnings: response.warnings,
+        suggestions: response.suggestions,
         timestamp: Date.now(),
       }
 
@@ -132,10 +180,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   selectRegion: (region: SelectedRegion | null) => {
     if (region) {
+      const name = region.statnaam
+      // Always show gemeente-level suggestions regardless of what was clicked
+      const suggestions = [
+        `Wat is de bevolkingsdichtheid in ${name}?`,
+        `WOZ-waarde in ${name}`,
+        `Inkomen per inwoner in ${name}`,
+        `Vergelijk ${name} met omliggende gemeenten`,
+      ]
       const sysMsg: Message = {
         id: uid(),
         role: 'system',
-        content: `📍 ${region.statnaam} (${region.statcode}) selected — your next question will be scoped to this region.`,
+        content: `📍 ${name} (${region.statcode}) selected`,
+        suggestions,
         timestamp: Date.now(),
       }
       set({ selectedRegion: region, messages: [...get().messages, sysMsg] })
@@ -145,7 +202,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   switchLayer: async (level: GeographyLevel) => {
-    const { currentPlan } = get()
+    const { currentPlan, selectedRegion } = get()
 
     // Skip if already on this level
     if (currentPlan?.geography_level === level) return
@@ -154,7 +211,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ isLayerLoading: true, error: null })
 
     try {
-      const scope = level === 'gemeente' ? null : (currentPlan?.region_scope ?? null)
+      // Drill-down scope logic:
+      // gemeente → wijk/buurt: prefer selectedRegion, then currentPlan scope, then null (all NL)
+      // wijk → buurt: same logic
+      // anything → gemeente: always null (national)
+      let scope: string | null = null
+      if (level !== 'gemeente') {
+        scope =
+          (selectedRegion?.statcode?.startsWith('GM') ? selectedRegion.statcode
+          : (selectedRegion?.gm_code ?? null))
+          || (currentPlan?.region_scope ?? null)
+      }
+
       const geojson = await api.boundaries(level, scope)
       const newPlan = currentPlan
         ? { ...currentPlan, geography_level: level, region_scope: scope }
@@ -202,6 +270,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   clearError: () => set({ error: null }),
+
+  setFlyTo: (code: string | null) => set({ flyToStatcode: code }),
 
   reset: () =>
     set({

@@ -35,6 +35,11 @@ logger = logging.getLogger(__name__)
 # ── ColorBrewer sequential palettes (5-class and 7-class) ────────────────────
 
 _PALETTES: dict[str, list[list[str]]] = {
+    # Brand palette — cyan (#00A1CD) → deep navy (#271D6C)
+    "Brand": [
+        ["#e0f5fc", "#7dd4e8", "#00A1CD", "#1b3678", "#271D6C"],
+        ["#e0f5fc", "#9de3f1", "#4dc4e0", "#00A1CD", "#0e5d9c", "#1b3678", "#271D6C"],
+    ],
     "YlOrRd": [
         ["#ffffb2", "#fecc5c", "#fd8d3c", "#f03b20", "#bd0026"],
         ["#ffffb2", "#fed976", "#feb24c", "#fd8d3c", "#f03b20", "#bd0026", "#800026"],
@@ -54,7 +59,7 @@ _PALETTES: dict[str, list[list[str]]] = {
 }
 
 _NULL_COLOR = "#cccccc"
-_DEFAULT_PALETTE = "YlOrRd"
+_DEFAULT_PALETTE = "Brand"
 
 
 # ── Classification ────────────────────────────────────────────────────────────

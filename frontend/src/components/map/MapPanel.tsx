@@ -5,6 +5,7 @@ import { useChatStore } from '../../store/chatStore'
 import { MapLegend } from './MapLegend'
 import { MapTooltip } from './MapTooltip'
 import { MapControls } from './MapControls'
+import { MapSearch } from './MapSearch'
 import type { ChoroplethFeatureProperties, ChoroplethMeta } from '../../types'
 
 const NL_CENTER: [number, number] = [5.2913, 52.1326]
@@ -22,10 +23,11 @@ interface TooltipState {
 }
 
 export function MapPanel() {
-  const mapContainer = useRef<HTMLDivElement>(null)
-  const mapRef       = useRef<maplibregl.Map | null>(null)
-  const hoveredId    = useRef<string | number | null>(null)
-  const selectedId   = useRef<string | number | null>(null)
+  const mapContainer    = useRef<HTMLDivElement>(null)
+  const mapRef          = useRef<maplibregl.Map | null>(null)
+  const hoveredId       = useRef<string | number | null>(null)
+  const selectedId      = useRef<string | number | null>(null)
+  const isBoundaryOnly  = useRef(false)
 
   const [tooltip,  setTooltip]  = useState<TooltipState | null>(null)
   const [meta,     setMeta]     = useState<ChoroplethMeta | null>(null)
@@ -37,6 +39,8 @@ export function MapPanel() {
   const isLoading       = useChatStore(s => s.isLoading)
   const selectedRegion  = useChatStore(s => s.selectedRegion)
   const selectRegion    = useChatStore(s => s.selectRegion)
+  const flyToStatcode   = useChatStore(s => s.flyToStatcode)
+  const setFlyTo        = useChatStore(s => s.setFlyTo)
 
   // ── Init map ────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -50,7 +54,7 @@ export function MapPanel() {
       attributionControl: true,
     })
 
-    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
+    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right')
     map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left')
 
     map.on('load', () => setMapReady(true))
@@ -89,7 +93,8 @@ export function MapPanel() {
     })
 
     // Boundary-only mode (no CBS data) vs choropleth mode
-    const isBoundaryOnly = !fc_meta
+    const _isBoundaryOnly = !fc_meta
+    isBoundaryOnly.current = _isBoundaryOnly
 
     // Fill layer
     map.addLayer({
@@ -97,13 +102,13 @@ export function MapPanel() {
       type: 'fill',
       source: SOURCE_ID,
       paint: {
-        'fill-color': isBoundaryOnly
+        'fill-color': _isBoundaryOnly
           ? ['case',
               ['boolean', ['feature-state', 'selected'], false], '#dbeafe',
               ['boolean', ['feature-state', 'hover'],    false], '#e5e7eb',
               'transparent']
           : ['coalesce', ['get', 'color'], '#cccccc'],
-        'fill-opacity': isBoundaryOnly
+        'fill-opacity': _isBoundaryOnly
           ? ['case',
               ['boolean', ['feature-state', 'selected'], false], 0.6,
               ['boolean', ['feature-state', 'hover'],    false], 0.4,
@@ -126,15 +131,28 @@ export function MapPanel() {
           'case',
           ['boolean', ['feature-state', 'selected'], false], '#f59e0b',
           ['boolean', ['feature-state', 'hover'],    false], '#1d4ed8',
-          isBoundaryOnly ? '#6b7280' : '#ffffff',
+          _isBoundaryOnly ? '#6b7280' : '#ffffff',
         ],
         'line-width': [
           'case',
           ['boolean', ['feature-state', 'selected'], false], 2.5,
           ['boolean', ['feature-state', 'hover'],    false], 1.5,
-          isBoundaryOnly ? 1.0 : 0.5,
+          _isBoundaryOnly ? 1.0 : 0.5,
         ],
         'line-opacity': 0.9,
+      },
+    })
+
+    // Selected glow layer — bright amber border only on the selected feature
+    map.addLayer({
+      id: SELECTED_LAYER,
+      type: 'line',
+      source: SOURCE_ID,
+      paint: {
+        'line-color': '#f59e0b',
+        'line-width': ['case', ['boolean', ['feature-state', 'selected'], false], 3.5, 0],
+        'line-opacity': ['case', ['boolean', ['feature-state', 'selected'], false], 1.0, 0],
+        'line-blur': 1,
       },
     })
 
@@ -173,10 +191,43 @@ export function MapPanel() {
       const map = mapRef.current
       if (map && map.getSource(SOURCE_ID)) {
         map.setFeatureState({ source: SOURCE_ID, id: selectedId.current }, { selected: false })
+        if (map.getLayer(FILL_LAYER)) {
+          const ibo = isBoundaryOnly.current
+          map.setPaintProperty(FILL_LAYER, 'fill-opacity',
+            ibo
+              ? ['case', ['boolean', ['feature-state', 'selected'], false], 0.7, ['boolean', ['feature-state', 'hover'], false], 0.4, 0.0]
+              : ['case', ['boolean', ['feature-state', 'selected'], false], 0.95, ['boolean', ['feature-state', 'hover'], false], 0.85, 0.72]
+          )
+        }
       }
       selectedId.current = null
     }
   }, [selectedRegion])
+
+  // ── Fly to a searched/selected region ──────────────────────────────────────
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !flyToStatcode || !currentGeoJSON) return
+
+    const target = currentGeoJSON.features.find(
+      f => f.properties.statcode === flyToStatcode
+    )
+    if (!target?.geometry) {
+      setFlyTo(null)
+      return
+    }
+
+    const bounds = new maplibregl.LngLatBounds()
+    let hasCoords = false
+    collectCoords(target.geometry).forEach(([lng, lat]) => {
+      bounds.extend([lng, lat])
+      hasCoords = true
+    })
+    if (hasCoords) {
+      map.fitBounds(bounds, { padding: 80, maxZoom: 14, duration: 700 })
+    }
+    setFlyTo(null)
+  }, [flyToStatcode, currentGeoJSON, setFlyTo])
 
   // ── Hover + click interactions ──────────────────────────────────────────────
   const setupInteractions = useCallback(() => {
@@ -218,11 +269,28 @@ export function MapPanel() {
       const fid   = feat.id ?? null
       const props = feat.properties as ChoroplethFeatureProperties & { gm_code?: string }
 
+      const applyDim = (active: boolean) => {
+        if (!map.getLayer(FILL_LAYER)) return
+        const ibo = isBoundaryOnly.current
+        map.setPaintProperty(FILL_LAYER, 'fill-opacity',
+          ibo
+            ? ['case',
+                ['boolean', ['feature-state', 'selected'], false], 0.7,
+                ['boolean', ['feature-state', 'hover'],    false], active ? 0.25 : 0.4,
+                active ? 0.05 : 0.0]
+            : ['case',
+                ['boolean', ['feature-state', 'selected'], false], 0.95,
+                ['boolean', ['feature-state', 'hover'],    false], active ? 0.45 : 0.85,
+                active ? 0.12 : 0.72]
+        )
+      }
+
       if (fid === selectedId.current) {
         // Clicking the same feature deselects it
         if (fid !== null)
           map.setFeatureState({ source: SOURCE_ID, id: fid }, { selected: false })
         selectedId.current = null
+        applyDim(false)
         selectRegion(null)
       } else {
         // Deselect previous
@@ -232,6 +300,7 @@ export function MapPanel() {
         selectedId.current = fid
         if (fid !== null)
           map.setFeatureState({ source: SOURCE_ID, id: fid }, { selected: true })
+        applyDim(true)
         selectRegion({
           statcode: props.statcode,
           statnaam: props.statnaam,
@@ -246,6 +315,14 @@ export function MapPanel() {
       if (!features.length && selectedId.current !== null) {
         map.setFeatureState({ source: SOURCE_ID, id: selectedId.current }, { selected: false })
         selectedId.current = null
+        if (map.getLayer(FILL_LAYER)) {
+          const ibo = isBoundaryOnly.current
+          map.setPaintProperty(FILL_LAYER, 'fill-opacity',
+            ibo
+              ? ['case', ['boolean', ['feature-state', 'selected'], false], 0.7, ['boolean', ['feature-state', 'hover'], false], 0.4, 0.0]
+              : ['case', ['boolean', ['feature-state', 'selected'], false], 0.95, ['boolean', ['feature-state', 'hover'], false], 0.85, 0.72]
+          )
+        }
         selectRegion(null)
       }
     })
@@ -264,6 +341,11 @@ export function MapPanel() {
 
       {/* Layer toggles + selected region badge */}
       <MapControls />
+
+      {/* Search box — top right */}
+      <div className="absolute top-3 right-3 z-10 pointer-events-auto">
+        <MapSearch />
+      </div>
 
       {/* Loading overlay */}
       {isLoading && (
@@ -312,7 +394,7 @@ export function MapPanel() {
       )}
 
       {/* Attribution */}
-      <div className="absolute bottom-1 right-2 text-[10px] text-gray-400 dark:text-gray-600
+      <div className="absolute bottom-2 right-2 text-[10px] text-gray-400 dark:text-gray-600
                       pointer-events-none z-10">
         CBS StatLine × PDOK
       </div>

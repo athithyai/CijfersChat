@@ -25,6 +25,7 @@ import pandas as pd
 
 from cache import cache_get, cache_set, data_cache, make_key, metadata_cache
 from config import get_settings
+import duckdb_client
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -118,7 +119,15 @@ async def _detect_geo_column(table_id: str) -> str:
 
 
 async def get_measure_columns(table_id: str) -> list[dict[str, str]]:
-    """Return {code, title, unit} for numeric Topic/measure columns."""
+    """Return {code, title, unit} for numeric Topic/measure columns.
+
+    Checks local DuckDB first (instant), falls back to CBS OData API.
+    """
+    local = duckdb_client.get_columns_local(table_id)
+    if local is not None:
+        logger.debug("Measure columns from DuckDB for %s (%d cols)", table_id, len(local))
+        return local
+
     props = await get_data_properties(table_id)
     return [
         {
@@ -192,6 +201,24 @@ async def get_observations(
     if cached := cache_get(data_cache, cache_key):
         logger.info("Cache HIT for %s/%s", table_id, measure_code)
         return pd.DataFrame(cached)
+
+    # ── DuckDB fast paths ───────────────────────────────────────────────────
+    # 1. Spatial DuckDB (wide-format, built by ingest.py) — preferred
+    spatial_df = duckdb_client.get_observations_spatial(
+        measure_code, geography_level, region_scope
+    )
+    if spatial_df is not None:
+        cache_set(data_cache, cache_key, spatial_df.to_dict("records"))
+        return spatial_df
+
+    # 2. Legacy long-format DuckDB (cijfers.duckdb)
+    local_df = duckdb_client.get_observations_local(
+        table_id, measure_code, geography_level, region_scope
+    )
+    if local_df is not None:
+        cache_set(data_cache, cache_key, local_df.to_dict("records"))
+        return local_df
+    # ────────────────────────────────────────────────────────────────────────
 
     geo_col = await _detect_geo_column(table_id)
 

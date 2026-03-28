@@ -3,7 +3,7 @@ import { InputBar } from './InputBar'
 import { useChatStore } from '../../store/chatStore'
 
 export function ChatPanel() {
-  const { messages, reset, currentPlan } = useChatStore()
+  const { messages, reset } = useChatStore()
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -23,13 +23,6 @@ export function ChatPanel() {
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Current level indicator */}
-          {currentPlan && (
-            <span className="text-xs text-gray-400 dark:text-gray-500 hidden sm:block">
-              {currentPlan.geography_level} · {currentPlan.table_id}
-            </span>
-          )}
-
           {/* Reset button */}
           {messages.length > 0 && (
             <button

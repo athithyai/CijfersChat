@@ -59,6 +59,34 @@ export const api = {
   },
 
   health: () => get<{ status: string }>('/health'),
+
+  search: (q: string) => {
+    const params = new URLSearchParams({ q })
+    return get<{ results: import('../types').SearchResult[] }>(`/search?${params}`)
+  },
+
+  adminIngest: () =>
+    post<Record<string, never>, { status: string; progress?: string }>('/admin/ingest', {}),
+
+  adminStatus: () =>
+    get<{
+      status: string
+      started_at: string | null
+      finished_at: string | null
+      progress: string
+      region_counts: Record<string, number>
+      neighbor_count: number
+      notes: string[]
+      spatial_db_available: boolean
+      db_log?: {
+        run_id: number
+        started_at: string | null
+        finished_at: string | null
+        status: string
+        region_count: number
+        neighbor_count: number
+      }
+    }>('/admin/status'),
 }
 
 export { ApiError }

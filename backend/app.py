@@ -17,7 +17,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -37,7 +37,10 @@ from models import (
     PlanRequest,
 )
 from planner import generate_narration, generate_plan
+import spatial_service
 from spatial_service import get_geometries
+import duckdb_client
+import ingest as _ingest
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -49,12 +52,36 @@ settings = get_settings()
 catalog: CatalogIndex | None = None
 
 
+async def _warmup_geometry() -> None:
+    """Pre-fetch all PDOK geometry collections into cache at startup.
+
+    Runs as a background task so it does not block the first request.
+    gemeente  ≈  36 pages × 100 features  →   3 600 features  (~7 s)
+    wijk      ≈ 100 pages × 100 features  →  10 000 features  (~20 s)
+    buurt     ≈ 800 pages × 100 features  →  80 000 features  (~160 s)
+    """
+    import asyncio
+    for level in ("gemeente", "wijk", "buurt"):
+        try:
+            logger.info("Geometry warmup: fetching %s …", level)
+            await get_geometries(level, None)
+            logger.info("Geometry warmup: %s done", level)
+        except Exception as exc:
+            logger.warning("Geometry warmup failed for %s: %s", level, exc)
+        # Small pause between levels to avoid hammering PDOK
+        await asyncio.sleep(0.5)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
     global catalog
     logger.info("Building CBS catalog index …")
     catalog = await CatalogIndex.build()
     logger.info("Catalog ready — %d tables indexed", len(catalog.list_tables()))
+    # Kick off geometry warmup in background — does not block startup
+    asyncio.create_task(_warmup_geometry())
+    asyncio.create_task(spatial_service.init_province_map())
     yield
     logger.info("Shutting down CijfersChat backend")
 
@@ -103,22 +130,145 @@ async def generic_handler(request: Request, exc: Exception):
 
 _DEFAULT_MEASURE = "AantalInwoners_5"   # always present in kerncijfers tables
 
+# Measure codes that ONLY exist in 85984NED (2024 kerncijfers).
+# If the LLM picks one of these but sets table_id = "86165NED", we hard-correct
+# the table before any CBS API call is made — no matter what the LLM said.
+_REQUIRES_85984: frozenset[str] = frozenset({
+    # Births / deaths / households
+    "GeboorteTotaal_25", "SterfteTotaal_27", "HuishoudensTotaal_29",
+    # Energy
+    "GemiddeldAardgasverbruik_55", "GemiddeldeElektriciteitslevering_53",
+    # Education
+    "LeerlingenPo_62", "StudentenHbo_65", "StudentenWo_66",
+    # Income & wealth
+    "GemiddeldInkomenPerInwoner_78", "GemiddeldInkomenPerInkomensontvanger_77",
+    "GemGestandaardiseerdInkomen_83", "MediaanVermogenVanParticuliereHuish_86",
+    "PersonenInArmoede_81",
+    # Social security
+    "PersonenPerSoortUitkeringBijstand_87", "PersonenPerSoortUitkeringAO_88",
+    "PersonenPerSoortUitkeringWW_89", "PersonenPerSoortUitkeringAOW_90",
+    # Care
+    "JongerenMetJeugdzorgInNatura_91", "WmoClienten_93",
+    # Business
+    "BedrijfsvestigingenTotaal_95",
+    # Proximity
+    "AfstandTotGroteSupermarkt_111", "AfstandTotHuisartsenpraktijk_110",
+    "AfstandTotSchool_113", "AfstandTotKinderdagverblijf_112",
+})
+
+# OData measure codes that are valid in CBS StatLine but NOT in the local DuckDB
+# column index (either partial coverage or completely absent from DuckDB).
+# These codes must NEVER be replaced by _fallback_measure — the OData API handles them.
+_ODATA_ONLY_CODES: frozenset[str] = frozenset({
+    # Proximity measures — OData returns 342 GM rows; DuckDB bulk CSV only 28-44
+    "AfstandTotGroteSupermarkt_111",
+    "AfstandTotHuisartsenpraktijk_110",
+    "AfstandTotSchool_113",
+    "AfstandTotKinderdagverblijf_112",
+    # Labor measures — CBS publishes null at regional level; let OData confirm that
+    "WerkzameBeroepsbevolking_70",
+    "Nettoarbeidsparticipatie_71",
+    "PercentageZelfstandigen_75",
+})
+
+# CBS publishes these measures at gemeente AND buurt level, but NOT wijk level.
+# When the planner picks wijk for these, auto-correct to buurt (more granular and
+# actually available in the CBS table).
+_NOT_WIJK_CODES: dict[str, str] = {
+    # Proximity — CBS computes at buurt level only; no wijk aggregation
+    "AfstandTotGroteSupermarkt_111":  "buurt",
+    "AfstandTotHuisartsenpraktijk_110": "buurt",
+    "AfstandTotSchool_113":           "buurt",
+    "AfstandTotKinderdagverblijf_112":"buurt",
+}
+
+_FALLBACK_MESSAGE = """\
+Hmm, ik begreep die vraag niet helemaal. Hier zijn een paar voorbeeldvragen die ik wel begrijp:
+
+**Bevolking & demografie**
+- "Toon bevolkingsdichtheid per gemeente"
+- "Hoeveel ouderen per buurt in Amsterdam?"
+
+**Wonen & vastgoed**
+- "WOZ-waarde per wijk in Utrecht"
+- "Percentage koopwoningen per gemeente"
+
+**Inkomen & armoede**
+- "Gemiddeld inkomen per inwoner per gemeente"
+- "Armoede per buurt in Rotterdam"
+
+**Energie**
+- "Gasverbruik per gemeente"
+- "Woningen met zonnestroom in Noord-Holland"
+
+**Arbeid & onderwijs**
+- "Nettoarbeidsparticipatie per wijk"
+- "HBO/WO-opgeleide inwoners per gemeente"
+
+**Nabijheid van voorzieningen**
+- "Afstand tot supermarkt per buurt"
+- "Afstand tot huisartsenpraktijk per gemeente"
+
+**Zorg & sociale zekerheid**
+- "Bijstandsuitkeringen per wijk in Den Haag"
+- "Wmo-cliënten per gemeente"
+
+Probeer een van deze vragen, of beschrijf wat je wilt zien op de kaart!\
+"""
+
 # Human-readable labels for common measure codes (Dutch)
 _MEASURE_LABELS: dict[str, str] = {
+    # Bevolking
     "AantalInwoners_5":                       "Aantal inwoners",
     "Bevolkingsdichtheid_33":                 "Bevolkingsdichtheid",
     "Bevolkingsdichtheid_34":                 "Bevolkingsdichtheid",
+    "Mannen_6":                               "Mannen",
+    "Vrouwen_7":                              "Vrouwen",
+    "k_0Tot15Jaar_8":                         "Kinderen (0–15 jaar)",
+    "k_65JaarOfOuder_12":                     "Ouderen (65+)",
+    "GeboorteTotaal_25":                      "Geboorten",
+    "SterfteTotaal_27":                       "Sterfte",
+    "HuishoudensTotaal_29":                   "Huishoudens",
+    # Wonen
     "GemiddeldeWOZWaardeVanWoningen_39":      "Gemiddelde WOZ-waarde van woningen",
+    "Woningvoorraad_35":                      "Woningvoorraad",
+    "Koopwoningen_47":                        "Koopwoningen",
+    "HuurwoningenTotaal_48":                  "Huurwoningen",
+    # Energie
+    "GemiddeldAardgasverbruik_55":            "Gemiddeld aardgasverbruik",
+    "GemiddeldeElektriciteitslevering_53":    "Gemiddeld elektriciteitsverbruik",
+    # Onderwijs
+    "LeerlingenPo_62":                        "Leerlingen basisonderwijs",
+    "StudentenHbo_65":                        "Studenten hbo",
+    "StudentenWo_66":                         "Studenten universiteit",
+    # Inkomen
     "GemiddeldInkomenPerInwoner_78":          "Gemiddeld inkomen per inwoner",
     "GemiddeldInkomenPerInkomensontvanger_77":"Gemiddeld inkomen per ontvanger",
     "GemGestandaardiseerdInkomen_83":         "Gestandaardiseerd inkomen",
     "MediaanVermogenVanParticuliereHuish_86": "Mediaan vermogen",
     "PersonenInArmoede_81":                   "Personen in armoede",
-    "Woningvoorraad_35":                      "Woningvoorraad",
-    "Koopwoningen_47":                        "Koopwoningen",
-    "HuishoudensTotaal_29":                   "Huishoudens",
-    "k_0Tot15Jaar_8":                         "Kinderen (0-15 jaar)",
-    "k_65JaarOfOuder_12":                     "Ouderen (65+)",
+    # Sociale zekerheid
+    "PersonenPerSoortUitkeringBijstand_87":   "Bijstandsuitkeringen",
+    "PersonenPerSoortUitkeringAO_88":         "Arbeidsongeschiktheidsuitkeringen",
+    "PersonenPerSoortUitkeringWW_89":         "WW-uitkeringen",
+    "PersonenPerSoortUitkeringAOW_90":        "AOW-uitkeringen",
+    # Zorg
+    "JongerenMetJeugdzorgInNatura_91":        "Jongeren met jeugdzorg",
+    "WmoClienten_93":                         "Wmo-cliënten",
+    # Bedrijven
+    "BedrijfsvestigingenTotaal_95":           "Bedrijfsvestigingen",
+    # Motorvoertuigen
+    "PersonenautoSTotaal_104":                "Personenauto's",
+    "PersonenautoSPerHuishouden_107":         "Personenauto's per huishouden",
+    # Nabijheid
+    "AfstandTotGroteSupermarkt_111":          "Afstand tot grote supermarkt",
+    "AfstandTotHuisartsenpraktijk_110":       "Afstand tot huisartsenpraktijk",
+    "AfstandTotSchool_113":                   "Afstand tot basisschool",
+    "AfstandTotKinderdagverblijf_112":        "Afstand tot kinderdagverblijf",
+    # Oppervlakte
+    "OppervlakteTotaal_115":                  "Oppervlakte",
+    "Omgevingsadressendichtheid_121":         "Omgevingsadressendichtheid",
+    # Legacy / unused
     "Nettoarbeidsparticipatie_71":            "Nettoarbeidsparticipatie",
 }
 
@@ -132,6 +282,54 @@ _GM_NAMES: dict[str, str] = {
     "GM0796": "Den Bosch",   "GM0193": "Zwolle",     "GM0546": "Leiden",
     "GM0935": "Maastricht",  "GM0503": "Delft",
 }
+
+
+# ── Related-data connection graph ─────────────────────────────────────────────
+# Maps measure_code → list of (label, query_template) for follow-up suggestions.
+# Templates use {level} and {location} placeholders filled at runtime.
+_RELATED: dict[str, list[tuple[str, str]]] = {
+    # Bevolking
+    "AantalInwoners_5":          [("Bevolkingsdichtheid", "Bevolkingsdichtheid per {level}{loc}"), ("Gemiddeld inkomen", "Gemiddeld inkomen per inwoner per {level}{loc}"), ("Woningvoorraad", "Woningvoorraad per {level}{loc}")],
+    "Bevolkingsdichtheid_34":    [("Aantal inwoners", "Aantal inwoners per {level}{loc}"), ("Woningvoorraad", "Woningvoorraad per {level}{loc}"), ("Afstand tot supermarkt", "Afstand tot supermarkt per {level}{loc}")],
+    "k_0Tot15Jaar_8":            [("Leerlingen basisonderwijs", "Leerlingen basisonderwijs per {level}{loc}"), ("Jeugdzorg", "Jongeren met jeugdzorg per {level}{loc}"), ("Afstand tot school", "Afstand tot school per {level}{loc}")],
+    "k_65JaarOfOuder_12":        [("AOW-uitkeringen", "AOW-uitkeringen per {level}{loc}"), ("Wmo-cliënten", "Wmo-cliënten per {level}{loc}"), ("Afstand tot huisarts", "Afstand tot huisartsenpraktijk per {level}{loc}")],
+    # Wonen
+    "GemiddeldeWOZWaardeVanWoningen_39": [("Gemiddeld inkomen", "Gemiddeld inkomen per inwoner per {level}{loc}"), ("Koopwoningen", "Percentage koopwoningen per {level}{loc}"), ("Bevolkingsdichtheid", "Bevolkingsdichtheid per {level}{loc}")],
+    "Woningvoorraad_35":         [("WOZ-waarde", "WOZ-waarde per {level}{loc}"), ("Koopwoningen", "Percentage koopwoningen per {level}{loc}"), ("Huurwoningen", "Percentage huurwoningen per {level}{loc}")],
+    "Koopwoningen_47":           [("WOZ-waarde", "WOZ-waarde per {level}{loc}"), ("Huurwoningen", "Huurwoningen per {level}{loc}"), ("Mediaan vermogen", "Mediaan vermogen per {level}{loc}")],
+    # Energie
+    "GemiddeldAardgasverbruik_55":        [("Elektriciteitsverbruik", "Elektriciteitsverbruik per {level}{loc}"), ("Zonnestroom", "Woningen met zonnestroom per {level}{loc}"), ("Woningvoorraad", "Woningvoorraad per {level}{loc}")],
+    "GemiddeldeElektriciteitslevering_53":[("Gasverbruik", "Gasverbruik per {level}{loc}"), ("Zonnestroom", "Woningen met zonnestroom per {level}{loc}"), ("WOZ-waarde", "WOZ-waarde per {level}{loc}")],
+    "WoningenMetZonnestroom_59":          [("Gasverbruik", "Gasverbruik per {level}{loc}"), ("Elektriciteitsverbruik", "Elektriciteitsverbruik per {level}{loc}"), ("WOZ-waarde", "WOZ-waarde per {level}{loc}")],
+    # Inkomen
+    "GemiddeldInkomenPerInwoner_78":      [("WOZ-waarde", "WOZ-waarde per {level}{loc}"), ("Armoede", "Armoede per {level}{loc}"), ("Nettoarbeidsparticipatie", "Nettoarbeidsparticipatie per {level}{loc}")],
+    "PersonenInArmoede_81":               [("Gemiddeld inkomen", "Gemiddeld inkomen per inwoner per {level}{loc}"), ("Bijstand", "Bijstandsuitkeringen per {level}{loc}"), ("WW-uitkeringen", "WW-uitkeringen per {level}{loc}")],
+    "MediaanVermogenVanParticuliereHuish_86": [("Gemiddeld inkomen", "Gemiddeld inkomen per inwoner per {level}{loc}"), ("WOZ-waarde", "WOZ-waarde per {level}{loc}"), ("Koopwoningen", "Koopwoningen per {level}{loc}")],
+    # Arbeid
+    "Nettoarbeidsparticipatie_71":        [("Gemiddeld inkomen", "Gemiddeld inkomen per inwoner per {level}{loc}"), ("HBO/WO-opgeleiden", "HBO/WO-opgeleiden per {level}{loc}"), ("Bedrijfsvestigingen", "Bedrijfsvestigingen per {level}{loc}")],
+    "WerkzameBeroepsbevolking_70":        [("Nettoarbeidsparticipatie", "Nettoarbeidsparticipatie per {level}{loc}"), ("Bijstand", "Bijstand per {level}{loc}"), ("Bedrijfsvestigingen", "Bedrijfsvestigingen per {level}{loc}")],
+    # Sociale zekerheid
+    "PersonenPerSoortUitkeringBijstand_87": [("Armoede", "Armoede per {level}{loc}"), ("WW-uitkeringen", "WW-uitkeringen per {level}{loc}"), ("Gemiddeld inkomen", "Gemiddeld inkomen per {level}{loc}")],
+    "PersonenPerSoortUitkeringWW_89":       [("Bijstand", "Bijstand per {level}{loc}"), ("Nettoarbeidsparticipatie", "Nettoarbeidsparticipatie per {level}{loc}"), ("Armoede", "Armoede per {level}{loc}")],
+    # Zorg
+    "JongerenMetJeugdzorgInNatura_91":    [("Jongeren 0-15 jaar", "Percentage jongeren per {level}{loc}"), ("Afstand tot school", "Afstand tot school per {level}{loc}"), ("Bijstand", "Bijstand per {level}{loc}")],
+    "WmoClienten_93":                     [("Ouderen 65+", "Percentage ouderen per {level}{loc}"), ("AOW-uitkeringen", "AOW-uitkeringen per {level}{loc}"), ("Afstand tot huisarts", "Afstand tot huisartsenpraktijk per {level}{loc}")],
+    # Bedrijven
+    "BedrijfsvestigingenTotaal_95":       [("Werkzame beroepsbevolking", "Werkzame beroepsbevolking per {level}{loc}"), ("Gemiddeld inkomen", "Gemiddeld inkomen per {level}{loc}"), ("Bevolkingsdichtheid", "Bevolkingsdichtheid per {level}{loc}")],
+    # Nabijheid
+    "AfstandTotGroteSupermarkt_111":      [("Afstand tot huisarts", "Afstand tot huisartsenpraktijk per {level}{loc}"), ("Afstand tot school", "Afstand tot school per {level}{loc}"), ("Bevolkingsdichtheid", "Bevolkingsdichtheid per {level}{loc}")],
+    "AfstandTotHuisartsenpraktijk_110":   [("Afstand tot supermarkt", "Afstand tot supermarkt per {level}{loc}"), ("Ouderen 65+", "Percentage ouderen per {level}{loc}"), ("Wmo-cliënten", "Wmo-cliënten per {level}{loc}")],
+    "AfstandTotSchool_113":               [("Leerlingen basisonderwijs", "Leerlingen basisonderwijs per {level}{loc}"), ("Afstand tot kinderdagverblijf", "Afstand tot kinderdagverblijf per {level}{loc}"), ("Jongeren 0-15", "Jongeren 0-15 jaar per {level}{loc}")],
+}
+
+def _make_suggestions(plan: "MapPlan") -> list[str]:
+    """Return 2–3 related follow-up query strings based on current measure."""
+    pairs = _RELATED.get(plan.measure_code, [])
+    if not pairs:
+        return []
+    level = plan.geography_level
+    loc   = f" in {_GM_NAMES[plan.region_scope]}" if plan.region_scope and plan.region_scope in _GM_NAMES else ""
+    return [tmpl.format(level=level, loc=loc) for _, tmpl in pairs[:3]]
 
 
 def _build_message(plan: "MapPlan", meta: dict | None = None) -> str:
@@ -223,23 +421,135 @@ _CITY_TO_GM: dict[str, str] = {
 }
 
 
-def _correct_region_scope(message: str, plan: "MapPlan") -> "MapPlan":
-    """Validate that region_scope matches city names mentioned in the message.
+import re as _re
 
-    llama3.2 occasionally maps a city to the wrong GM code. This post-hoc
-    check overrides the scope when a known city is unambiguously mentioned.
+# Patterns that unambiguously signal a buffer/comparison query.
+# Matched against the full user message (which includes [Selected region: ...] context).
+_BUFFER_SIGNALS: list[_re.Pattern] = [
+    # Dutch: "vergelijk X met andere/omliggende/naburige gemeenten/wijken/buurten"
+    _re.compile(r"vergelijk\s+(.+?)\s+met\s+(?:andere|omliggende|naburige|omringende)", _re.I),
+    # Dutch: "X en omgeving" / "X eo"
+    _re.compile(r"([\w\s\-]+?)\s+(?:en\s+omgeving|eo)\b", _re.I),
+    # Dutch: "(de\s+)?omgeving van X" / "omliggende X"
+    _re.compile(r"(?:de\s+)?omgeving\s+(?:van\s+)?([\w\s\-]+)", _re.I),
+    # Dutch: "omliggende gemeenten/wijken/buurten"  (center from selected region context)
+    _re.compile(r"omliggende\s+(?:gemeenten|wijken|buurten|gebieden)", _re.I),
+    # English: "compare X with other/surrounding/nearby"
+    _re.compile(r"compare\s+(.+?)\s+with\s+(?:other|surrounding|nearby)", _re.I),
+    # English: "surrounding (areas of) X"
+    _re.compile(r"surrounding\s+(?:areas?\s+of\s+)?([\w\s\-]+)", _re.I),
+]
+
+# Match [Selected region: NAME (CODE)] from the contextual text
+_SELECTED_RE = _re.compile(r"\[Selected region:\s*([^\(]+)\s*\(([A-Z0-9]+)", _re.I)
+
+
+def _infer_buffer_scope(message: str, plan: "MapPlan") -> "MapPlan":
+    """Post-hoc buffer detection when the LLM missed the buffer trigger.
+
+    If the message matches a comparison pattern but buffer_scope is not set,
+    this function infers the center region from the message text or the
+    [Selected region: NAME (CODE)] annotation appended by the frontend.
+    """
+    if plan.buffer_scope:
+        return plan  # Already set — nothing to do
+
+    msg = message
+    is_buffer_query = any(p.search(msg) for p in _BUFFER_SIGNALS)
+    if not is_buffer_query:
+        return plan
+
+    # Try to find the center region name
+    center: str | None = None
+
+    # 1. Try to extract from [Selected region: NAME (CODE)]
+    sel_match = _SELECTED_RE.search(msg)
+    if sel_match:
+        center = sel_match.group(1).strip()
+
+    # 2. Try the first capture group from Dutch/English comparison patterns
+    if not center:
+        for pat in _BUFFER_SIGNALS:
+            m = pat.search(msg)
+            if m and m.lastindex and m.lastindex >= 1:
+                candidate = m.group(1).strip()
+                # Skip fragments that are clearly not region names
+                if len(candidate) >= 2 and candidate.lower() not in (
+                    "de", "het", "een", "the", "a", "an", "andere", "omliggende"
+                ):
+                    center = candidate
+                    break
+
+    if not center:
+        return plan
+
+    km_map = {"gemeente": 50, "wijk": 20, "buurt": 10}
+    km = km_map.get(plan.geography_level, 50)
+    logger.info(
+        "Buffer inferred from message pattern: center=%r km=%d (LLM had buffer_scope=null)",
+        center, km,
+    )
+    return plan.model_copy(update={
+        "buffer_scope": center,
+        "buffer_km": float(km),
+        "region_scope": None,
+    })
+
+
+_PROVINCE_NAMES: frozenset[str] = frozenset({
+    "groningen", "friesland", "fryslân", "drenthe", "overijssel", "flevoland",
+    "gelderland", "utrecht", "noord-holland", "noord holland", "south holland",
+    "zuid-holland", "zuid holland", "zeeland", "noord-brabant", "noord brabant",
+    "limburg",
+})
+
+_PROVINCE_CANONICAL: dict[str, str] = {
+    "friesland": "Friesland", "fryslân": "Friesland",
+    "groningen": "Groningen", "drenthe": "Drenthe",
+    "overijssel": "Overijssel", "flevoland": "Flevoland",
+    "gelderland": "Gelderland", "utrecht": "Utrecht",
+    "noord-holland": "Noord-Holland", "noord holland": "Noord-Holland",
+    "south holland": "Zuid-Holland",
+    "zuid-holland": "Zuid-Holland", "zuid holland": "Zuid-Holland",
+    "zeeland": "Zeeland",
+    "noord-brabant": "Noord-Brabant", "noord brabant": "Noord-Brabant",
+    "limburg": "Limburg",
+}
+
+
+def _correct_region_scope(message: str, plan: "MapPlan") -> "MapPlan":
+    """Post-hoc correction of region/province scope.
+
+    1. If a known province name is in the message but province_scope is unset, set it.
+    2. If a known city name is in the message and region_scope is wrong, correct it.
     """
     lower = message.lower()
-    for city, code in _CITY_TO_GM.items():
-        if city not in lower:
-            continue
-        if plan.region_scope != code:
-            logger.warning(
-                "Correcting region_scope '%s' → '%s' (city '%s' found in message)",
-                plan.region_scope, code, city,
-            )
-            return plan.model_copy(update={"region_scope": code})
-        break   # city found and scope already correct — stop
+
+    # Province correction — check before city so "Utrecht" province wins over "Utrecht" city
+    if plan.province_scope is None:
+        for alias, canonical in _PROVINCE_CANONICAL.items():
+            if alias in lower:
+                if plan.province_scope != canonical:
+                    logger.info("Correcting province_scope None → '%s'", canonical)
+                    plan = plan.model_copy(update={
+                        "province_scope": canonical,
+                        "region_scope": None,
+                    })
+                break
+
+    # City correction (only if no province scope was just set)
+    if plan.province_scope is None:
+        for city, code in _CITY_TO_GM.items():
+            if city not in lower:
+                continue
+            if plan.region_scope != code:
+                logger.warning(
+                    "Correcting region_scope '%s' → '%s' (city '%s' in message)",
+                    plan.region_scope, code, city,
+                )
+                return plan.model_copy(update={"region_scope": code})
+            break
+
     return plan
 
 
@@ -291,6 +601,9 @@ async def _execute_plan(plan: MapPlan) -> tuple[dict[str, Any], list[str]]:
         geojson = await get_geometries(
             geo_level=plan.geography_level,
             region_scope=plan.region_scope,
+            province_scope=plan.province_scope,
+            buffer_scope=plan.buffer_scope,
+            buffer_km=plan.buffer_km,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
@@ -364,6 +677,18 @@ async def boundaries_endpoint(
     return geojson
 
 
+@app.get("/search", tags=["data"])
+async def search_endpoint(q: str = "", limit: int = 12):
+    """Search for regions by name across all geography levels.
+
+    Returns immediately with whatever is cached; empty if geometry not yet loaded.
+    """
+    if len(q.strip()) < 2:
+        return {"results": []}
+    results = spatial_service.search_regions(q.strip(), limit=limit)
+    return {"results": results}
+
+
 @app.post("/map-data", response_model=MapDataResponse, tags=["data"])
 async def map_data_endpoint(body: MapDataRequest):
     """Execute a MapPlan and return enriched GeoJSON."""
@@ -411,13 +736,10 @@ async def chat_endpoint(body: ChatRequest):
             message="Sorry, I didn't quite understand that.",
         )
         return ChatResponse(
-            message=(
-                "Sorry, I didn't quite understand that. Could you rephrase? "
-                "Try something like: 'Show population density by buurt in Amsterdam'."
-            ),
+            message=_FALLBACK_MESSAGE,
             plan=fallback_plan,
             geojson={"type": "FeatureCollection", "features": []},
-            warnings=[f"Planning could not produce a valid query: {str(exc)[:120]}"],
+            warnings=[],
         )
 
     # Guard: only allow priority (kerncijfers) tables
@@ -437,21 +759,30 @@ async def chat_endpoint(body: ChatRequest):
     # Correct region_scope against city names in the message (fixes model hallucinations)
     plan = _correct_region_scope(body.message, plan)
 
+    # Infer buffer scope when LLM missed a comparison/surrounding pattern
+    plan = _infer_buffer_scope(body.message, plan)
+
+    # Safety net: if buffer_scope is active (set by LLM or inferred), region_scope
+    # MUST be None — otherwise get_geometries scopes to just one polygon instead
+    # of fetching all surrounding regions for the buffer to filter.
+    if plan.buffer_scope and plan.region_scope:
+        logger.info(
+            "Clearing region_scope=%r — buffer_scope=%r takes precedence",
+            plan.region_scope, plan.buffer_scope,
+        )
+        plan = plan.model_copy(update={"region_scope": None})
+
+    if plan.buffer_scope:
+        logger.info("Buffer scope active: center=%r km=%.0f", plan.buffer_scope, plan.buffer_km)
+
     measure_label = _MEASURE_LABELS.get(plan.measure_code, plan.measure_code.replace("_", " "))
 
-    # ── Info intent: conversational only, no map, no CBS validation ───────────
+    # ── Info intent: return the planner's message directly — no Narrator call.
+    # The Narrator has no CBS data context here and would hallucinate facts.
     if plan.intent == "info":
-        logger.info("Info intent — calling Narrator for natural reply")
-        reply = await generate_narration(
-            user_message=body.message,
-            plan=plan,
-            meta=None,
-            history=body.history,
-            measure_label=measure_label,
-            top_regions=None,
-        )
+        logger.info("Info intent — returning planner message directly")
         return ChatResponse(
-            message=reply,
+            message=plan.message,
             plan=plan,
             geojson={"type": "FeatureCollection", "features": []},
             warnings=[],
@@ -477,23 +808,52 @@ async def chat_endpoint(body: ChatRequest):
 
     # ── Map choropleth: validate measure, fetch CBS + PDOK + join, narrate ──────
 
+    # Auto-correct geography_level when CBS doesn't publish this measure at wijk level.
+    # E.g. proximity measures exist at buurt/gemeente but NOT wijk — switch to buurt.
+    if plan.geography_level == "wijk" and plan.measure_code in _NOT_WIJK_CODES:
+        corrected_level = _NOT_WIJK_CODES[plan.measure_code]
+        logger.info(
+            "Level corrected: wijk → %s (measure '%s' not available at wijk level)",
+            corrected_level, plan.measure_code,
+        )
+        plan = plan.model_copy(update={"geography_level": corrected_level})
+
+    # Hard-correct table_id when the LLM picks a measure that only exists in 85984NED.
+    # This overrides any hallucinated table_id before any CBS API call is made.
+    if plan.measure_code in _REQUIRES_85984 and plan.table_id != "85984NED":
+        logger.info(
+            "table_id corrected: '%s' → '85984NED' (measure '%s' requires 2024 table)",
+            plan.table_id, plan.measure_code,
+        )
+        plan = plan.model_copy(update={"table_id": "85984NED"})
+
     # Only validate measure_code for map queries (skipped for info/explain)
     try:
         valid_codes = {m["code"] for m in await get_measure_columns(plan.table_id)}
         if valid_codes and plan.measure_code not in valid_codes:
-            fallback = _fallback_measure(plan.measure_code, valid_codes)
-            logger.warning(
-                "measure_code '%s' not in table %s; using '%s'",
-                plan.measure_code, plan.table_id, fallback,
-            )
-            plan = plan.model_copy(update={"measure_code": fallback})
+            if plan.measure_code in _ODATA_ONLY_CODES:
+                # Valid OData code that DuckDB doesn't index — trust the planner
+                logger.info(
+                    "measure_code '%s' not in DuckDB index but is a known OData code — keeping",
+                    plan.measure_code,
+                )
+            else:
+                fallback = _fallback_measure(plan.measure_code, valid_codes)
+                logger.warning(
+                    "measure_code '%s' not in table %s; using '%s'",
+                    plan.measure_code, plan.table_id, fallback,
+                )
+                plan = plan.model_copy(update={"measure_code": fallback})
     except Exception as exc:
         logger.warning("Could not validate measure_code: %s", exc)
 
-    # At gemeente level a GM scope would return only 1 polygon — not useful for
-    # a choropleth. Fetch ALL gemeenten but keep region_scope in the plan so the
-    # frontend can zoom to / highlight the requested gemeente.
-    fetch_scope = None if plan.geography_level == "gemeente" else plan.region_scope
+    # Pass region_scope through unchanged so the map is always scoped to exactly
+    # what was asked:
+    #   - gemeente + GM scope  → just that single municipality
+    #   - wijk/buurt + GM scope → all districts/neighbourhoods in that municipality
+    #   - buffer_scope set      → spatial buffer handles filtering; region_scope is null
+    #   - no scope              → all Netherlands
+    fetch_scope = plan.region_scope
 
     enriched: dict = {"type": "FeatureCollection", "features": []}
     warnings: list[str] = []
@@ -511,6 +871,19 @@ async def chat_endpoint(body: ChatRequest):
         warnings.append(f"Could not load map data: {exc.detail}")
         # Fall through to Narrator — it will explain gracefully with meta=None
 
+    # For buffer queries: find the center region's value so narrator can compare
+    center_value: float | None = None
+    if plan.buffer_scope:
+        bs_upper = plan.buffer_scope.strip().upper()
+        bs_lower = plan.buffer_scope.strip().lower()
+        for f in enriched.get("features", []):
+            props = f.get("properties", {})
+            sc = str(props.get("statcode", "")).strip().upper()
+            sn = str(props.get("statnaam", "")).strip().lower()
+            if sc == bs_upper or sn == bs_lower:
+                center_value = props.get("value")
+                break
+
     # Call Narrator for a rich conversational reply
     reply = await generate_narration(
         user_message=body.message,
@@ -519,6 +892,7 @@ async def chat_endpoint(body: ChatRequest):
         history=body.history,
         measure_label=measure_label,
         top_regions=top_regions or None,
+        center_value=center_value if plan.buffer_scope else None,
     )
 
     return ChatResponse(
@@ -526,4 +900,52 @@ async def chat_endpoint(body: ChatRequest):
         plan=plan,
         geojson=enriched,
         warnings=warnings,
+        suggestions=_make_suggestions(plan),
     )
+
+
+# ── Admin endpoints ────────────────────────────────────────────────────────────
+
+async def _run_ingest_task() -> None:
+    """Background task wrapper — manages spatial DuckDB connection lifecycle."""
+    # Close the read connection BEFORE writing to avoid file-lock issues on Windows
+    duckdb_client.invalidate_spatial_conn()
+    try:
+        await _ingest.run_ingest()
+    finally:
+        # Force reconnect so the next spatial query picks up the freshly rebuilt file
+        duckdb_client.invalidate_spatial_conn()
+
+
+@app.post("/admin/ingest", tags=["admin"])
+async def admin_ingest(background_tasks: BackgroundTasks):
+    """Trigger a background rebuild of cbs_spatial.duckdb.
+
+    Downloads all CBS kerncijfers data for gemeente/wijk/buurt, computes
+    shared-boundary adjacency, and writes the preprocessed database.
+    Takes 5–15 minutes depending on network speed.  Poll /admin/status.
+    """
+    status = _ingest.get_status()
+    if status["status"] == "running":
+        return {"status": "already_running", "progress": status.get("progress", "")}
+    background_tasks.add_task(_run_ingest_task)
+    return {"status": "started"}
+
+
+@app.get("/admin/status", tags=["admin"])
+async def admin_status():
+    """Return the current ingest pipeline status.
+
+    Combines live run-state (from ingest.py) with the last persisted log entry
+    (from cbs_spatial.duckdb) so the frontend always gets a useful timestamp.
+    """
+    live = _ingest.get_status()
+
+    # Augment with last persisted log entry when idle
+    if live["status"] in ("idle", "done", "error"):
+        db_log = duckdb_client.get_ingest_status()
+        if db_log:
+            live["db_log"] = db_log
+
+    live["spatial_db_available"] = duckdb_client.is_spatial_available()
+    return live

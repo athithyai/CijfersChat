@@ -6,21 +6,34 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
-        mono: ['JetBrains Mono', 'monospace'],
+        sans:    ['Akko Pro', 'system-ui', 'sans-serif'],
+        display: ['Soho Pro', 'Georgia', 'serif'],
+        mono:    ['JetBrains Mono', 'monospace'],
       },
       colors: {
         brand: {
-          50:  '#eff6ff',
-          100: '#dbeafe',
-          200: '#bfdbfe',
-          300: '#93c5fd',
-          400: '#60a5fa',
-          500: '#3b82f6',
-          600: '#2563eb',
-          700: '#1d4ed8',
-          800: '#1e40af',
-          900: '#1e3a8a',
+          50:  '#e8f6fb',
+          100: '#b3e6f5',
+          200: '#7dd4e8',
+          300: '#40bfda',
+          400: '#00A1CD',   // CBS primary brand — "Chat"
+          500: '#0580A1',   // CBS link / interactive
+          600: '#005470',   // CBS dark teal — hover
+          700: '#3d3b8a',   // mid purple
+          800: '#271D6C',   // CBS heading purple — "Cijfers"
+          900: '#091D23',   // CBS body text / darkest
+          950: '#060f13',   // deepest dark
+        },
+        // CBS semantic aliases for direct use
+        cbs: {
+          text:       '#091D23',
+          heading:    '#271D6C',
+          link:       '#0580A1',
+          brand:      '#00A1CD',
+          secondary:  '#878787',
+          border:     '#D2D2D2',
+          bg:         '#E9E9E9',
+          white:      '#FFFFFF',
         },
       },
       animation: {

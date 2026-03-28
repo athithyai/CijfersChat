@@ -1,16 +1,78 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChatPanel } from '../chat/ChatPanel'
 import { MapPanel } from '../map/MapPanel'
+import { DataTable } from '../map/DataTable'
 import { ThemeToggle } from './ThemeToggle'
+import { LogoWordmark } from '../LogoIcon'
+import { api } from '../../api/client'
 
 const MIN_CHAT_WIDTH = 300
 const MAX_CHAT_WIDTH = 640
 const DEFAULT_CHAT_WIDTH = 400
 
+// ── Ingest status helpers ─────────────────────────────────────────────────────
+
+type IngestStatus = 'idle' | 'running' | 'done' | 'error'
+
+function _fmtDate(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  try {
+    const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z')
+    return d.toLocaleDateString('nl-NL', { day: 'numeric', month: 'short', year: 'numeric' })
+  } catch {
+    return iso.slice(0, 10)
+  }
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
 export function AppShell() {
   const [chatWidth, setChatWidth] = useState(DEFAULT_CHAT_WIDTH)
   const [dragging, setDragging] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
+
+  // Ingest / refresh state
+  const [ingestStatus, setIngestStatus] = useState<IngestStatus>('idle')
+  const [ingestLastRun, setIngestLastRun] = useState<string | null>(null)
+  const [ingestProgress, setIngestProgress] = useState<string>('')
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Fetch initial status on mount
+  useEffect(() => {
+    api.adminStatus().then(s => {
+      const lastRun = s.db_log?.finished_at ?? s.finished_at
+      setIngestLastRun(lastRun ?? null)
+      setIngestStatus(s.status as IngestStatus)
+    }).catch(() => {/* silently ignore */})
+  }, [])
+
+  // Poll while running
+  useEffect(() => {
+    if (ingestStatus === 'running') {
+      pollRef.current = setInterval(async () => {
+        try {
+          const s = await api.adminStatus()
+          setIngestProgress(s.progress ?? '')
+          if (s.status !== 'running') {
+            setIngestStatus(s.status as IngestStatus)
+            const lastRun = s.db_log?.finished_at ?? s.finished_at
+            setIngestLastRun(lastRun ?? null)
+            if (pollRef.current) clearInterval(pollRef.current)
+          }
+        } catch { /* ignore */ }
+      }, 3000)
+    }
+    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+  }, [ingestStatus])
+
+  const handleRefresh = useCallback(async () => {
+    if (ingestStatus === 'running') return
+    try {
+      await api.adminIngest()
+      setIngestStatus('running')
+      setIngestProgress('Starting …')
+    } catch { /* ignore */ }
+  }, [ingestStatus])
 
   const startDrag = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -39,26 +101,49 @@ export function AppShell() {
     <div className="h-screen w-screen flex flex-col bg-gray-50 dark:bg-gray-950 overflow-hidden">
       {/* Header */}
       <header className="flex items-center justify-between px-4 h-12 bg-white dark:bg-gray-900
-                         border-b border-gray-200 dark:border-gray-800 shrink-0 z-10 shadow-sm">
-        <div className="flex items-center gap-2">
-          {/* Logo mark */}
-          <div className="w-7 h-7 rounded-lg bg-brand-600 flex items-center justify-center">
-            <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
-                d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0
-                   13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0
-                   00-.553-.894L15 4m0 13V4m0 0L9 7" />
-            </svg>
-          </div>
-          <span className="font-semibold text-gray-900 dark:text-gray-100 text-sm">
-            CijfersChat
-          </span>
-          <span className="text-xs text-gray-400 hidden sm:block">
+                         border-b border-cbs-border dark:border-gray-800 shrink-0 z-10 shadow-sm">
+        <div className="flex items-center gap-3">
+          <LogoWordmark iconSize={28} />
+          <span className="text-xs hidden sm:block" style={{ color: '#878787' }}>
             Dutch Regional Statistics
           </span>
         </div>
-        <div className="flex items-center gap-1">
-          <span className="text-xs text-gray-400 mr-2 hidden sm:block">
+        <div className="flex items-center gap-2">
+          {/* Spatial data refresh — small hidden chip, visible on hover */}
+          <div className="group relative hidden sm:flex items-center">
+            <button
+              onClick={handleRefresh}
+              disabled={ingestStatus === 'running'}
+              title={
+                ingestStatus === 'running'
+                  ? `Vernieuwen: ${ingestProgress}`
+                  : `Ruimtelijke data vernieuwen${ingestLastRun ? ` · bijgewerkt ${_fmtDate(ingestLastRun)}` : ''}`
+              }
+              className={[
+                'flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium',
+                'border transition-all duration-200',
+                ingestStatus === 'running'
+                  ? 'border-amber-300 text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950 cursor-wait'
+                  : ingestStatus === 'error'
+                  ? 'border-red-300 text-red-500 hover:bg-red-50 dark:hover:bg-red-950'
+                  : 'border-gray-200 dark:border-gray-700 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:border-gray-300 dark:hover:border-gray-500',
+              ].join(' ')}
+            >
+              <span
+                className={ingestStatus === 'running' ? 'animate-spin inline-block' : ''}
+                style={{ display: 'inline-block' }}
+              >↻</span>
+              <span className="opacity-0 group-hover:opacity-100 transition-opacity duration-150 max-w-0 group-hover:max-w-[160px] overflow-hidden whitespace-nowrap">
+                {ingestStatus === 'running'
+                  ? (ingestProgress || 'Vernieuwen …')
+                  : ingestLastRun
+                  ? `bijgewerkt ${_fmtDate(ingestLastRun)}`
+                  : 'data vernieuwen'}
+              </span>
+            </button>
+          </div>
+
+          <span className="text-xs mr-1 hidden sm:block" style={{ color: '#878787' }}>
             CBS StatLine × PDOK
           </span>
           <ThemeToggle />
@@ -88,6 +173,9 @@ export function AppShell() {
           <MapPanel />
         </div>
       </div>
+
+      {/* Data table — full-width bottom strip, spans chat + map */}
+      <DataTable />
     </div>
   )
 }

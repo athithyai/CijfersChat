@@ -12,6 +12,7 @@ export interface MapPlan {
   measure_code: string
   geography_level: GeographyLevel
   region_scope: string | null
+  province_scope?: string | null
   period: string | null
   classification: Classification
   n_classes: number
@@ -56,18 +57,28 @@ export interface ChatResponse {
   plan: MapPlan
   geojson: ChoroplethFeatureCollection
   warnings: string[]
+  suggestions: string[]
 }
 
 // ── Chat store ────────────────────────────────────────────────────────────────
 
 export type MessageRole = 'user' | 'assistant' | 'error' | 'system'
 
+export interface ChartDataPoint {
+  name: string
+  value: number
+  label: string
+  color: string
+}
+
 export interface Message {
   id: string
   role: MessageRole
   content: string
   plan?: MapPlan
+  chartData?: ChartDataPoint[]
   warnings?: string[]
+  suggestions?: string[]
   timestamp: number
 }
 
@@ -77,6 +88,13 @@ export interface SelectedRegion {
   gm_code?: string
 }
 
+export interface SearchResult {
+  statnaam: string
+  statcode: string
+  gm_code: string
+  level: 'gemeente' | 'wijk' | 'buurt'
+}
+
 export interface ChatState {
   messages: Message[]
   currentPlan: MapPlan | null
@@ -84,6 +102,8 @@ export interface ChatState {
   selectedRegion: SelectedRegion | null
   isLoading: boolean       // chat request in flight
   isLayerLoading: boolean  // layer switch in flight (map stays interactive during chat)
+  flyToStatcode: string | null
+  setFlyTo: (code: string | null) => void
   error: string | null
   sendMessage: (text: string) => Promise<void>
   selectRegion: (region: SelectedRegion | null) => void

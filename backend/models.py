@@ -23,6 +23,15 @@ class MapPlan(BaseModel):
         None,
         description="CBS region code to scope results, e.g. 'GM0363'. None = all Netherlands.",
     )
+    province_scope: str | None = Field(
+        None,
+        description="Dutch province name, e.g. 'Noord-Holland'. Filters geometry to that province.",
+    )
+    buffer_scope: str | None = Field(
+        None,
+        description="Center region name or code for spatial buffer comparison (e.g. 'Gellicum').",
+    )
+    buffer_km: float = Field(15.0, ge=1.0, le=100.0, description="Buffer radius in km.")
     period: str | None = Field(
         None,
         description="Ignored — kerncijfers tables are single-year snapshots.",
@@ -33,15 +42,64 @@ class MapPlan(BaseModel):
 
     # ── Field validators ─────────────────────────────────────────────────────
 
+    @field_validator("geography_level", mode="before")
+    @classmethod
+    def normalize_geography_level(cls, v: str) -> str:
+        """Normalize geography level — always gemeente (wijk/buurt reserved for future)."""
+        _synonyms: dict[str, str] = {
+            "municipality": "gemeente", "municipalities": "gemeente",
+            "gemeenten": "gemeente", "gemeentes": "gemeente",
+            # wijk/buurt → gemeente until sub-municipality support is re-enabled
+            "wijk": "gemeente", "wijken": "gemeente",
+            "district": "gemeente", "districts": "gemeente",
+            "buurt": "gemeente", "buurten": "gemeente",
+            "neighbourhood": "gemeente", "neighborhoods": "gemeente",
+            "neighbourhoods": "gemeente", "neighborhood": "gemeente",
+        }
+        result = _synonyms.get(str(v).strip().lower(), str(v).strip().lower())
+        # Hard clamp — even if a future value slips through, force gemeente
+        if result in ("wijk", "buurt"):
+            return "gemeente"
+        return result
+
     @field_validator("measure_code", mode="before")
     @classmethod
     def sanitize_measure_code(cls, v: str) -> str:
-        """Strip whitespace and reject codes containing spaces, slashes or operators.
+        """Normalise measure codes: map English synonyms → Dutch CBS names, then
+        strip whitespace and reject codes containing spaces, slashes or operators.
 
-        The LLM occasionally outputs formulas like 'A_1 / B_2'.
+        The LLM occasionally outputs English names or formulas like 'A_1 / B_2'.
         We take only the first valid token (word chars + underscore).
         """
+        # English → Dutch CBS column name synonyms (LLM tends to invent these)
+        _EN_TO_NL: dict[str, str] = {
+            "NumberInhabitants_5":      "AantalInwoners_5",
+            "Inhabitants_5":            "AantalInwoners_5",
+            "Population_5":             "AantalInwoners_5",
+            "TotalPopulation_5":        "AantalInwoners_5",
+            "PopulationDensity_34":     "Bevolkingsdichtheid_34",
+            "PopulationDensity_33":     "Bevolkingsdichtheid_34",
+            "AreaTotal_115":            "OppervlakteTotaal_115",
+            "TotalArea_115":            "OppervlakteTotaal_115",
+            "WOZValue_39":              "GemiddeldeWOZWaardeVanWoningen_39",
+            "HouseValue_39":            "GemiddeldeWOZWaardeVanWoningen_39",
+            "AverageHouseValue_39":     "GemiddeldeWOZWaardeVanWoningen_39",
+            "AverageIncome_78":         "GemiddeldInkomenPerInwoner_78",
+            "Income_78":                "GemiddeldInkomenPerInwoner_78",
+            "AverageIncomePerInhabitant_78": "GemiddeldInkomenPerInwoner_78",
+            "GasConsumption_55":        "GemiddeldAardgasverbruik_55",
+            "AverageGasConsumption_55": "GemiddeldAardgasverbruik_55",
+            "ElectricityDelivery_53":   "GemiddeldeElektriciteitslevering_53",
+            "DistanceSupermarket_111":  "AfstandTotGroteSupermarkt_111",
+            "DistanceGP_110":           "AfstandTotHuisartsenpraktijk_110",
+            "DistanceSchool_113":       "AfstandTotSchool_113",
+            "Poverty_81":               "PersonenInArmoede_81",
+            "PovertyRate_81":           "PersonenInArmoede_81",
+            "Businesses_95":            "BedrijfsvestigingenTotaal_95",
+        }
         v = str(v).strip()
+        if v in _EN_TO_NL:
+            return _EN_TO_NL[v]
         # Extract the first valid CBS column token: word chars and underscores only
         match = re.match(r"^([A-Za-z_]\w*)", v)
         if match:
@@ -79,14 +137,36 @@ class MapPlan(BaseModel):
             return None   # silently drop invalid scope rather than crash
         return v.upper()
 
-    # ── Cross-field validator ─────────────────────────────────────────────────
+    @field_validator("buffer_scope", mode="before")
+    @classmethod
+    def sanitize_buffer_scope(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = str(v).strip()
+        if v.lower() in ("null", "none", ""):
+            return None
+        return v
+
+    # ── Cross-field validators ────────────────────────────────────────────────
 
     @model_validator(mode="after")
     def validate_scope_level(self) -> "MapPlan":
-        """Ensure region_scope prefix is consistent with geography_level."""
-        if self.region_scope and self.region_scope.startswith("BU"):
-            # Buurt-scoped region makes no sense for a buurt-level map; widen to NL
+        """Ensure scoping fields are mutually consistent.
+
+        Rules
+        -----
+        1. buffer_scope + region_scope: buffer takes precedence — region_scope
+           must be None so the geometry fetch is not scoped to just one region.
+        2. buurt region_scope on buurt map: doesn't make sense; widen to NL.
+        """
+        # Rule 1: buffer queries should never be scoped to a single region
+        if self.buffer_scope and self.region_scope:
             self.region_scope = None
+
+        # Rule 2: buurt code as region_scope on a buurt-level map is a no-op
+        if self.region_scope and self.region_scope.startswith("BU"):
+            self.region_scope = None
+
         return self
 
 
@@ -113,6 +193,7 @@ class ChatResponse(BaseModel):
     plan: MapPlan
     geojson: dict[str, Any]          # GeoJSON FeatureCollection
     warnings: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)  # Related follow-up queries
 
 
 class MapDataResponse(BaseModel):

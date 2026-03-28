@@ -26,32 +26,117 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 # CBS tables known to contain wijk/buurt kerncijfers — checked first
-_PRIORITY_TABLES = ["86165NED", "85984NED", "84799NED", "85318NED"]
+# 86165NED (2025): demographics, housing, vehicles, area
+# 85984NED (2024): ALL categories — energy, labor, income, social, care, business, proximity
+_PRIORITY_TABLES = ["86165NED", "85984NED", "85618NED", "84799NED"]
 
-# Verified measure codes from 86165NED DataProperties (2025 edition)
-# Used as fallback hints when the LLM needs guidance
+# Verified measure codes — cross-referenced against CBS OData DataProperties.
+# Covers all 12 CBS categories shown on the data portal.
+# Used as fallback hints when the LLM needs guidance.
 _TOPIC_HINTS: dict[str, list[str]] = {
-    "population":    ["AantalInwoners_5"],
-    "bevolking":     ["AantalInwoners_5"],
-    "inwoners":      ["AantalInwoners_5"],
-    "house":         ["GemiddeldWOZWaardeVanWoningen_39"],
-    "woz":           ["GemiddeldWOZWaardeVanWoningen_39"],
-    "woningwaarde":  ["GemiddeldWOZWaardeVanWoningen_39"],
-    "huiswaarde":    ["GemiddeldWOZWaardeVanWoningen_39"],
-    "density":       ["Bevolkingsdichtheid_34"],
-    "dichtheid":     ["Bevolkingsdichtheid_34"],
-    "income":        ["GemiddeldInkomenPerInwoner_78"],
-    "inkomen":       ["GemiddeldInkomenPerInwoner_78"],
-    "households":    ["Particulierehuishoudens_28"],
-    "huishoudens":   ["Particulierehuishoudens_28"],
-    "men":           ["Mannen_6"],
-    "mannen":        ["Mannen_6"],
-    "women":         ["Vrouwen_7"],
-    "vrouwen":       ["Vrouwen_7"],
-    "youth":         ["k_0Tot15Jaar_8"],
-    "jongeren":      ["k_0Tot15Jaar_8"],
-    "elderly":       ["k_65JaarOfOuder_12"],
-    "ouderen":       ["k_65JaarOfOuder_12"],
+    # ── Bevolking (86165NED) ───────────────────────────────────────────────────
+    "population":       ["AantalInwoners_5"],
+    "bevolking":        ["AantalInwoners_5"],
+    "inwoners":         ["AantalInwoners_5"],
+    "density":          ["Bevolkingsdichtheid_34"],
+    "dichtheid":        ["Bevolkingsdichtheid_34"],
+    "men":              ["Mannen_6"],
+    "mannen":           ["Mannen_6"],
+    "women":            ["Vrouwen_7"],
+    "vrouwen":          ["Vrouwen_7"],
+    "youth":            ["k_0Tot15Jaar_8"],
+    "jongeren":         ["k_0Tot15Jaar_8"],
+    "elderly":          ["k_65JaarOfOuder_12"],
+    "ouderen":          ["k_65JaarOfOuder_12"],
+    "geboorte":         ["GeboorteTotaal_25"],       # 85984NED code
+    "births":           ["GeboorteTotaal_25"],
+    "sterfte":          ["SterfteTotaal_27"],         # 85984NED code
+    "deaths":           ["SterfteTotaal_27"],
+    "households":       ["HuishoudensTotaal_29"],     # 85984NED code
+    "huishoudens":      ["HuishoudensTotaal_29"],
+    # ── Wonen en vastgoed (86165NED / 85984NED) ───────────────────────────────
+    "house":            ["GemiddeldeWOZWaardeVanWoningen_39"],
+    "woz":              ["GemiddeldeWOZWaardeVanWoningen_39"],
+    "woningwaarde":     ["GemiddeldeWOZWaardeVanWoningen_39"],
+    "huiswaarde":       ["GemiddeldeWOZWaardeVanWoningen_39"],
+    "vastgoed":         ["GemiddeldeWOZWaardeVanWoningen_39"],
+    "woningen":         ["Woningvoorraad_35"],
+    "housing":          ["Woningvoorraad_35"],
+    "koopwoning":       ["Koopwoningen_47"],
+    "huurwoning":       ["HuurwoningenTotaal_48"],
+    # ── Energie (85984NED) ────────────────────────────────────────────────────
+    "energie":          ["GemiddeldeElektriciteitslevering_53"],
+    "energy":           ["GemiddeldeElektriciteitslevering_53"],
+    "elektriciteit":    ["GemiddeldeElektriciteitslevering_53"],
+    "electricity":      ["GemiddeldeElektriciteitslevering_53"],
+    "gas":              ["GemiddeldAardgasverbruik_55"],
+    "gasverbruik":      ["GemiddeldAardgasverbruik_55"],
+    # zonnestroom → not available at regional level (CBS suppresses this data)
+    "zonnestroom":      ["GemiddeldeElektriciteitslevering_53"],
+    "solar":            ["GemiddeldeElektriciteitslevering_53"],
+    # ── Onderwijs (85984NED) ──────────────────────────────────────────────────
+    "onderwijs":        ["StudentenHbo_65"],
+    "education":        ["StudentenHbo_65"],
+    "leerlingen":       ["LeerlingenPo_62"],
+    "students":         ["LeerlingenPo_62"],
+    "hbo":              ["StudentenHbo_65"],
+    "university":       ["StudentenWo_66"],
+    # ── Arbeid (85984NED) — NOT AVAILABLE: CBS publishes null at regional level ─
+    # Redirect to income / businesses as best available proxy
+    "arbeid":           ["GemiddeldInkomenPerInwoner_78"],
+    "werkenden":        ["GemiddeldInkomenPerInwoner_78"],
+    "labor":            ["GemiddeldInkomenPerInwoner_78"],
+    "work":             ["GemiddeldInkomenPerInwoner_78"],
+    "employment":       ["GemiddeldInkomenPerInwoner_78"],
+    "werkgelegenheid":  ["BedrijfsvestigingenTotaal_95"],
+    "zelfstandigen":    ["BedrijfsvestigingenTotaal_95"],
+    # ── Inkomen (85984NED) ────────────────────────────────────────────────────
+    "income":           ["GemiddeldInkomenPerInwoner_78"],
+    "inkomen":          ["GemiddeldInkomenPerInwoner_78"],
+    "salaris":          ["GemiddeldInkomenPerInwoner_78"],
+    "wealthy":          ["GemiddeldInkomenPerInwoner_78"],
+    "armoede":          ["PersonenInArmoede_81"],
+    "poverty":          ["PersonenInArmoede_81"],
+    "vermogen":         ["MediaanVermogenVanParticuliereHuish_86"],
+    # ── Sociale zekerheid (85984NED) ──────────────────────────────────────────
+    "uitkering":        ["PersonenPerSoortUitkeringBijstand_87"],
+    "welfare":          ["PersonenPerSoortUitkeringBijstand_87"],
+    "bijstand":         ["PersonenPerSoortUitkeringBijstand_87"],
+    "ao":               ["PersonenPerSoortUitkeringAO_88"],
+    "ww":               ["PersonenPerSoortUitkeringWW_89"],
+    "aow":              ["PersonenPerSoortUitkeringAOW_90"],
+    # ── Zorg (85984NED) ───────────────────────────────────────────────────────
+    "zorg":             ["JongerenMetJeugdzorgInNatura_91"],
+    "jeugdzorg":        ["JongerenMetJeugdzorgInNatura_91"],
+    "wmo":              ["WmoClienten_93"],
+    "care":             ["JongerenMetJeugdzorgInNatura_91"],
+    # ── Bedrijfsvestigingen (85984NED) ────────────────────────────────────────
+    "bedrijven":        ["BedrijfsvestigingenTotaal_95"],
+    "vestigingen":      ["BedrijfsvestigingenTotaal_95"],
+    "business":         ["BedrijfsvestigingenTotaal_95"],
+    "companies":        ["BedrijfsvestigingenTotaal_95"],
+    # ── Motorvoertuigen (86165NED) ────────────────────────────────────────────
+    "auto":             ["PersonenautoSTotaal_104"],
+    "cars":             ["PersonenautoSTotaal_104"],
+    "voertuigen":       ["PersonenautoSTotaal_104"],
+    "personenauto":     ["PersonenautoSTotaal_104"],
+    # ── Nabijheid (85984NED) ──────────────────────────────────────────────────
+    "supermarkt":       ["AfstandTotGroteSupermarkt_111"],
+    "supermarket":      ["AfstandTotGroteSupermarkt_111"],
+    "huisarts":         ["AfstandTotHuisartsenpraktijk_110"],
+    "doctor":           ["AfstandTotHuisartsenpraktijk_110"],
+    "basisschool":      ["AfstandTotSchool_113"],
+    "school":           ["AfstandTotSchool_113"],
+    "kinderdagverblijf":["AfstandTotKinderdagverblijf_112"],
+    "nabijheid":        ["AfstandTotGroteSupermarkt_111"],
+    "proximity":        ["AfstandTotGroteSupermarkt_111"],
+    # ── Oppervlakte (86165NED) ────────────────────────────────────────────────
+    "oppervlakte":      ["OppervlakteTotaal_115"],
+    "area":             ["OppervlakteTotaal_115"],
+    "omgevingsadres":   ["Omgevingsadressendichtheid_121"],
+    "oad":              ["Omgevingsadressendichtheid_121"],
+    "urban":            ["Omgevingsadressendichtheid_121"],
+    "stedelijk":        ["Omgevingsadressendichtheid_121"],
 }
 
 

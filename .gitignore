@@ -31,7 +31,8 @@ Thumbs.db
 *.gpkg
 *.geojson.cache
 *.parquet
-data/
+*.duckdb
+backend/data/
 
 # Claude Code local settings
 .claude/settings.local.json

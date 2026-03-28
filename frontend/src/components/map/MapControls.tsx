@@ -5,8 +5,7 @@ import type { GeographyLevel } from '../../types'
 
 const LEVELS: { value: GeographyLevel; label: string; sublabel: string }[] = [
   { value: 'gemeente', label: 'Gemeente', sublabel: 'municipalities' },
-  { value: 'wijk',    label: 'Wijk',     sublabel: 'districts' },
-  { value: 'buurt',   label: 'Buurt',    sublabel: 'neighbourhoods' },
+  // wijk + buurt kept for future use — not exposed in UI yet
 ]
 
 export function MapControls() {
@@ -25,11 +24,13 @@ export function MapControls() {
       <div className="bg-white dark:bg-gray-900 rounded-xl shadow-lg border
                       border-gray-200 dark:border-gray-700 overflow-hidden">
         <div className="px-3 py-1.5 border-b border-gray-100 dark:border-gray-800">
-          <span className="text-[10px] font-semibold uppercase tracking-wider
-                           text-gray-400 dark:text-gray-500">
+          <span className="font-display text-[10px] font-medium uppercase tracking-wider"
+                style={{ color: '#878787' }}>
             Geography layer
           </span>
         </div>
+
+
         <div className="flex flex-col">
           {LEVELS.map(({ value, label, sublabel }) => {
             const isActive = activeLevel === value
@@ -43,28 +44,30 @@ export function MapControls() {
                 className={[
                   'flex items-center gap-2.5 px-3 py-2 text-left transition-colors',
                   'border-b border-gray-100 dark:border-gray-800 last:border-0',
-                  isActive
-                    ? 'bg-brand-50 dark:bg-brand-950 text-brand-700 dark:text-brand-300'
-                    : 'text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800',
+                  isActive ? '' : 'hover:bg-gray-50 dark:hover:bg-gray-800',
                   disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer',
                 ].join(' ')}
+                style={isActive
+                  ? { backgroundColor: '#e8f6fb', color: '#271D6C' }
+                  : { color: '#091D23' }}
               >
                 {/* Active indicator dot */}
-                <span className={[
-                  'w-1.5 h-1.5 rounded-full shrink-0 transition-colors',
-                  isActive ? 'bg-brand-600 dark:bg-brand-400' : 'bg-gray-300 dark:bg-gray-600',
-                ].join(' ')} />
+                <span
+                  className="w-1.5 h-1.5 rounded-full shrink-0 transition-colors"
+                  style={{ backgroundColor: isActive ? '#00A1CD' : '#D2D2D2' }}
+                />
 
                 <span className="flex flex-col min-w-0">
                   <span className="text-xs font-medium leading-tight">{label}</span>
-                  <span className="text-[10px] text-gray-400 dark:text-gray-500 leading-tight">
+                  <span className="text-[10px] leading-tight" style={{ color: '#878787' }}>
                     {sublabel}
                   </span>
                 </span>
 
                 {isActive && isLayerLoading && (
-                  <span className="ml-auto w-3 h-3 border-2 border-brand-400 border-t-transparent
-                                   rounded-full animate-spin shrink-0" />
+                  <span className="ml-auto w-3 h-3 border-2 border-t-transparent
+                                   rounded-full animate-spin shrink-0"
+                        style={{ borderColor: '#00A1CD', borderTopColor: 'transparent' }} />
                 )}
               </button>
             )
@@ -78,8 +81,8 @@ export function MapControls() {
                         border-brand-200 dark:border-brand-800 px-3 py-2
                         flex items-start gap-2 max-w-[180px]">
           <div className="flex-1 min-w-0">
-            <p className="text-[10px] font-semibold uppercase tracking-wider
-                          text-brand-500 dark:text-brand-400 mb-0.5">
+            <p className="font-display text-[10px] font-medium uppercase tracking-wider mb-0.5"
+               style={{ color: '#0580A1' }}>
               Selected
             </p>
             <p className="text-xs font-medium text-gray-800 dark:text-gray-200 truncate">
