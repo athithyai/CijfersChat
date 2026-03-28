@@ -668,6 +668,14 @@ async def run_ingest(year: int | None = None) -> dict[str, Any]:
                 level, len(merged), len(merged.columns),
             )
 
+        # Close all read-only singletons before opening write connections
+        try:
+            from duckdb_client import invalidate_spatial_conn, invalidate_geo_conn
+            invalidate_spatial_conn()
+            invalidate_geo_conn()
+        except Exception as exc:
+            logger.debug("Connection invalidation skipped: %s", exc)
+
         # ── Step 6: Write DuckDB ───────────────────────────────────────────────
         _status["progress"] = "Writing cbs_spatial.duckdb …"
         counts = await asyncio.to_thread(
@@ -681,14 +689,6 @@ async def run_ingest(year: int | None = None) -> dict[str, Any]:
             n_geom = await asyncio.to_thread(_write_geometry_db, gem_features, regions_df)
             counts["gemeente_geo"] = n_geom
             logger.info("gemeente_geo: %d features", n_geom)
-
-        # Invalidate read-only connections so the next query picks up the new DB
-        try:
-            from duckdb_client import invalidate_spatial_conn, invalidate_geo_conn
-            invalidate_spatial_conn()
-            invalidate_geo_conn()
-        except Exception as exc:
-            logger.debug("Connection invalidation skipped: %s", exc)
 
         _status.update({
             "status":       "done",
