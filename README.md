@@ -8,16 +8,16 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![React](https://img.shields.io/badge/React-18-61DAFB?style=flat&logo=react&logoColor=black)](https://react.dev)
 [![MapLibre GL](https://img.shields.io/badge/MapLibre_GL-4.x-396CB2?style=flat&logo=maplibre&logoColor=white)](https://maplibre.org)
-[![Tailwind CSS](https://img.shields.io/badge/Tailwind-3.x-06B6D4?style=flat&logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
+[![DuckDB](https://img.shields.io/badge/DuckDB-1.1+-FFC300?style=flat)](https://duckdb.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 <br/>
 
 > Type a plain-language question → get an interactive choropleth map of the Netherlands
 
-**"Show average house value by buurt in Utrecht"**
-**"Vergelijk bevolkingsdichtheid per gemeente in Noord-Holland"**
-**"Inkomen per wijk in Amsterdam"**
+**"Gasverbruik per gemeente in Noord-Holland"**
+**"Bevolkingsdichtheid in Friesland"**
+**"Inkomen per inwoner in Land van Cuijk"**
 
 </div>
 
@@ -27,240 +27,141 @@
 
 | | |
 |---|---|
-| 🧠 **LLM-powered intent parsing** | Natural language → structured JSON plan, no hardcoded queries |
-| 🗺️ **Live choropleth maps** | Gemeente · Wijk · Buurt levels with smooth transitions |
-| 📊 **CBS StatLine integration** | Direct OData v3 queries against official Dutch statistics |
-| 🏘️ **PDOK boundary service** | Real-time administrative boundaries, always up-to-date |
-| 🖱️ **Interactive selection** | Click any polygon → ask a follow-up question about it |
+| 🧠 **Two-LLM pipeline** | Planner (temp=0) → structured JSON plan · Narrator (temp=0.7) → conversational reply |
+| 🗺️ **Live choropleth maps** | Gemeente level with smooth transitions and legend |
+| 📊 **CBS StatLine** | Direct OData v3 queries against official Dutch statistics |
+| 🦆 **Local DuckDB pipeline** | Geometry + stats stored locally — no PDOK API calls at query time |
+| 🏘️ **Spatial adjacency** | ST_Touches neighbor computation for buffer/compare queries |
+| 🖱️ **Interactive selection** | Click any municipality → ask follow-up questions about it |
 | 🌗 **Dark / light mode** | Fully themed UI |
 | 🔌 **Any OpenAI-compatible LLM** | Ollama (free, local) · OpenAI · Groq · Azure OpenAI |
-| ⚡ **Layered caching** | Geometry cached 24 h · Statistics cached 15 min |
-
----
-
-## 📸 Demo
-
-```
-User  ›  Show population density by gemeente
-
-      ┌──────────────────────────────────────────────────────┐
-      │  💬 Chat                  🗺️  Map                    │
-      │  ─────────────────        ─────────────────────────  │
-      │  You: Show population     [Choropleth of NL with      │
-      │  density by gemeente      colour-coded gemeenten]     │
-      │                                                        │
-      │  Assistant:               Legend                       │
-      │  Bevolkingsdichtheid      ████ 0 – 500 /km²           │
-      │  per gemeente voor        ████ 500 – 1 500 /km²       │
-      │  Nederland. Bereik:       ████ 1 500 – 3 000 /km²     │
-      │  13 – 6 897 (342          ████ 3 000 – 6 000 /km²     │
-      │  gemeenten).              ████ > 6 000 /km²            │
-      └──────────────────────────────────────────────────────┘
-```
+| 🐳 **Docker ready** | Single container — nginx + uvicorn, auto-bootstraps data on first run |
 
 ---
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                           CijfersChat                                │
-│                                                                       │
-│  ┌────────────────────────────────────────────────────────────────┐  │
-│  │                    Frontend (React + Vite)                     │  │
-│  │                                                                 │  │
-│  │   ┌──────────────┐    ┌──────────────┐    ┌─────────────────┐  │  │
-│  │   │  ChatPanel   │    │   MapPanel   │    │   MapControls   │  │  │
-│  │   │  ─────────── │    │  ─────────── │    │  ─────────────  │  │  │
-│  │   │  Message     │    │  MapLibre GL │    │  Layer toggle   │  │  │
-│  │   │  history     │    │  Choropleth  │    │  GM · WK · BU   │  │  │
-│  │   │  Plan card   │    │  Legend      │    │  Boundaries     │  │  │
-│  │   │  Input bar   │    │  Tooltip     │    │  only mode      │  │  │
-│  │   └──────┬───────┘    └──────┬───────┘    └─────────────────┘  │  │
-│  │          │                   │                                   │  │
-│  │          └────────┬──────────┘  Zustand store                   │  │
-│  └───────────────────┼────────────────────────────────────────────┘  │
-│                       │  HTTP (REST JSON)                             │
-│  ┌────────────────────┼────────────────────────────────────────────┐  │
-│  │                FastAPI Backend                                   │  │
-│  │                       │                                          │  │
-│  │  POST /chat           ▼                                          │  │
-│  │  ┌────────────────────────────────────────────────────────────┐ │  │
-│  │  │                    planner.py                               │ │  │
-│  │  │  User message ──► LLM (Ollama / OpenAI / Groq)            │ │  │
-│  │  │                         │                                   │ │  │
-│  │  │                         ▼                                   │ │  │
-│  │  │              Structured JSON Plan                           │ │  │
-│  │  │  { table_id, measure_code, geography_level, region_scope } │ │  │
-│  │  └──────────────────────────┬──────────────────────────────── ┘ │  │
-│  │                              │                                    │  │
-│  │              ┌───────────────┼───────────────┐                   │  │
-│  │              ▼               ▼               ▼                   │  │
-│  │  ┌────────────────┐ ┌──────────────┐ ┌───────────────┐          │  │
-│  │  │ catalog_index  │ │  cbs_client  │ │spatial_service│          │  │
-│  │  │ ────────────── │ │ ──────────── │ │ ────────────  │          │  │
-│  │  │ CBS table      │ │ OData v3     │ │ PDOK OGC API  │          │  │
-│  │  │ metadata index │ │ queries with │ │ GeoJSON       │          │  │
-│  │  │ Topic/measure  │ │ $select      │ │ boundaries    │          │  │
-│  │  │ lookup         │ │ $filter      │ │ pagination    │          │  │
-│  │  └────────────────┘ └──────┬───────┘ └──────┬────────┘          │  │
-│  │                             │                │                    │  │
-│  │                             └───────┬────────┘                   │  │
-│  │                                     ▼                             │  │
-│  │                            ┌─────────────────┐                   │  │
-│  │                            │  join_engine.py  │                   │  │
-│  │                            │ ─────────────── │                   │  │
-│  │                            │ CBS df ⋈ PDOK   │                   │  │
-│  │                            │ Quantile / equal│                   │  │
-│  │                            │ classification  │                   │  │
-│  │                            │ GeoJSON + meta  │                   │  │
-│  │                            └────────┬────────┘                   │  │
-│  └─────────────────────────────────────┼──────────────────────────┘  │
-│                                         │  Enriched GeoJSON           │
-└─────────────────────────────────────────┼──────────────────────────── ┘
-                                          ▼
-                              React renders choropleth
+┌──────────────────────────────────────────────────────────────────┐
+│                          CijfersChat                              │
+│                                                                    │
+│  Frontend (React + Vite + MapLibre GL + Zustand)                  │
+│    ChatPanel · MapPanel · Legend · Tooltip · InputBar             │
+│                        │  POST /api/chat                          │
+│  FastAPI Backend                                                   │
+│    planner.py ──► LLM ──► JSON Plan                              │
+│         │                   │                                      │
+│         ▼                   ▼                                      │
+│    cbs_client          spatial_service                             │
+│    CBS OData v3    DuckDB-first (gemeente_geo.duckdb)             │
+│    ↳ DuckDB fast   ↳ fallback: disk cache → PDOK API             │
+│    path first                                                      │
+│         │                   │                                      │
+│         └─────── join_engine ──────► Enriched GeoJSON            │
+│                                                                    │
+│  Local data (backend/data/)                                        │
+│    cijfers.duckdb       CBS statistics (long format)              │
+│    cbs_spatial.duckdb   CBS wide format + regions + neighbors     │
+│    gemeente_geo.duckdb  Gemeente polygons + ST_Touches adjacency  │
+└──────────────────────────────────────────────────────────────────┘
 ```
-
----
-
-## 🗂️ Data Sources
-
-### CBS StatLine — Statistics
-
-| | |
-|---|---|
-| **Provider** | Centraal Bureau voor de Statistiek (CBS) |
-| **API** | OData v3 — `https://opendata.cbs.nl/ODataFeed/odata/` |
-| **Auth** | None required |
-| **License** | CC BY 4.0 |
-| **Key tables** | See table below |
-
-#### Priority CBS Tables
-
-| Table ID | Title | Year | Notes |
-|----------|-------|------|-------|
-| `86165NED` | Kerncijfers wijken en buurten 2025 | 2025 | Default |
-| `85984NED` | Kerncijfers wijken en buurten 2024 | 2024 | Income data |
-| `84799NED` | Kerncijfers wijken en buurten 2022 | 2022 | |
-| `85318NED` | Kerncijfers wijken en buurten 2023 | 2023 | |
-
-#### Key Measure Codes (`86165NED`)
-
-| Code | Dutch label | Unit |
-|------|-------------|------|
-| `AantalInwoners_5` | Aantal inwoners | persons |
-| `Bevolkingsdichtheid_33` | Bevolkingsdichtheid | /km² |
-| `GemiddeldeHuishoudensgrootte_28` | Gem. huishoudensgrootte | persons |
-| `GemiddeldInkomenPerInwoner_66` | Gem. inkomen per inwoner | × €1 000 |
-| `GemiddeldeWOZWaardeVanWoningen_39` | Gem. WOZ-waarde woningen | × €1 000 |
-| `Koopwoningen_50` | Koopwoningen | % |
-| `HuurwoningenTotaal_51` | Huurwoningen totaal | % |
-| `OmgevingsadressendichtheidGem_105` | Omgevingsadressendichtheid | /km² |
-
----
-
-### PDOK — Boundaries
-
-| | |
-|---|---|
-| **Provider** | Publieke Dienstverlening Op de Kaart (PDOK) |
-| **API** | OGC API Features — `https://api.pdok.nl/cbs/gebiedsindelingen/ogc/v1/` |
-| **Auth** | None required |
-| **License** | CC BY 4.0 |
-| **Collections** | `gemeente_gegeneraliseerd` · `wijk_gegeneraliseerd` · `buurt_gegeneraliseerd` |
-
-#### Geographic Levels
-
-| Level | CBS code | PDOK field | Count (2024) | Example |
-|-------|----------|------------|--------------|---------|
-| Gemeente | `GM####` | `statcode` | 342 | `GM0363` Amsterdam |
-| Wijk | `WK######` | `statcode` | ~3 000 | `WK036300` |
-| Buurt | `BU########` | `statcode` | ~12 000 | `BU03630000` |
-
-> ⚠️ PDOK does not support server-side CQL filtering. All boundary filtering is performed client-side after fetching the full collection. Geometry collections are cached for 24 hours.
 
 ---
 
 ## 🚀 Quick Start
 
-### Prerequisites
-
-| Tool | Version | Install |
-|------|---------|---------|
-| Python | 3.11+ | [python.org](https://python.org) |
-| Node.js | 20 LTS+ | [nodejs.org](https://nodejs.org) |
-| Ollama *(free)* | latest | [ollama.com](https://ollama.com) |
-
-### 1 · Clone
+### Option A — Docker (recommended)
 
 ```bash
 git clone https://github.com/athithyai/CijfersChat.git
 cd CijfersChat
-```
 
-### 2 · Configure
-
-```bash
-# Windows
-copy .env.example .env
-
-# macOS / Linux
+# Copy env and set your LLM provider (see Configuration below)
 cp .env.example .env
+
+# Build and run — data is auto-downloaded on first start (~2 min)
+docker-compose up --build
 ```
 
-The default `.env` points to Ollama — no API key needed.
+App → **http://localhost**
 
-### 3 · Pull an LLM (Ollama)
+> Data is persisted in a Docker volume — subsequent starts are instant.
+
+---
+
+### Option B — Local development
+
+#### Prerequisites
+
+| Tool | Version |
+|------|---------|
+| Python | 3.11+ |
+| Node.js | 20 LTS+ |
+| Ollama *(for local LLM)* | latest |
+
+#### 1 · Clone & configure
 
 ```bash
-ollama pull llama3.2          # recommended default  ~2 GB
-# or
-ollama pull phi4-mini         # faster               ~2.5 GB
-# or
-ollama pull mistral           # higher quality       ~4 GB
+git clone https://github.com/athithyai/CijfersChat.git
+cd CijfersChat
+cp .env.example .env   # edit LLM settings if needed
 ```
 
-> If Ollama is already installed it auto-starts as a background service.
-> Verify: `curl http://localhost:11434/v1/models`
+#### 2 · Pull an LLM (Ollama)
 
-### 4 · Start the backend
+```bash
+ollama pull phi4          # recommended — best instruction following  ~9 GB
+# or
+ollama pull llama3.2      # smaller, faster                           ~2 GB
+```
+
+#### 3 · Download CBS data + geometry
 
 ```bash
 cd backend
 pip install -r ../requirements.txt
+python download_data.py        # downloads stats CSVs + gemeente geometry
+```
+
+This creates:
+- `data/cijfers.duckdb` — CBS statistics (long format)
+- `data/gemeente_geo.duckdb` — gemeente polygons + ST_Touches neighbor pairs
+
+> `gemeente_geo.duckdb` requires `gemeente_raw.json` to exist first.
+> Start the backend once, let it warm up geometry from PDOK, then re-run.
+
+#### 4 · Start backend
+
+```bash
 uvicorn app:app --reload --host 0.0.0.0 --port 8000
 ```
 
-✅ Swagger UI → http://localhost:8000/docs
-
-### 5 · Start the frontend
+#### 5 · Start frontend
 
 ```bash
-# new terminal
-cd frontend
+cd ../frontend
 npm install
 npm run dev
 ```
 
-✅ App → **http://localhost:5173**
+App → **http://localhost:5173**
 
 ---
 
 ## ⚙️ Configuration
 
-All settings live in `.env` (copy from `.env.example`):
+All settings in `.env`:
 
 ```env
-# ── LLM provider ────────────────────────────────────────────────────────────
+# ── LLM provider ─────────────────────────────────────────────────────────────
 # Ollama (default — free, local)
 LLM_BASE_URL=http://localhost:11434/v1
-LLM_MODEL=llama3.2
+LLM_MODEL=phi4
 LLM_API_KEY=ollama
 
-# OpenAI GPT-4o (better accuracy)
+# OpenAI (better accuracy, ~$0.001/query with gpt-4o-mini)
 # LLM_BASE_URL=https://api.openai.com/v1
-# LLM_MODEL=gpt-4o
+# LLM_MODEL=gpt-4o-mini
 # LLM_API_KEY=sk-...
 
 # Groq (free tier, very fast)
@@ -268,16 +169,11 @@ LLM_API_KEY=ollama
 # LLM_MODEL=llama-3.3-70b-versatile
 # LLM_API_KEY=gsk_...
 
-# ── Data APIs (no key required) ──────────────────────────────────────────────
+# ── Data APIs ────────────────────────────────────────────────────────────────
 CBS_ODATA_BASE=https://opendata.cbs.nl/ODataFeed/odata
 PDOK_OGC_BASE=https://api.pdok.nl/cbs/gebiedsindelingen/ogc/v1
 
-# ── Cache TTLs ───────────────────────────────────────────────────────────────
-CACHE_TTL_METADATA=3600    # 1 h  — CBS catalog
-CACHE_TTL_GEOMETRY=86400   # 24 h — PDOK boundaries
-CACHE_TTL_DATA=900         # 15 m — CBS observations
-
-# ── Boundary year ────────────────────────────────────────────────────────────
+# ── Boundary year ─────────────────────────────────────────────────────────────
 DEFAULT_GEO_YEAR=2024
 ```
 
@@ -286,93 +182,44 @@ DEFAULT_GEO_YEAR=2024
 ## 💬 Example Queries
 
 ```
-# House values
-Show average WOZ value by buurt in Utrecht
-Gemiddelde woningwaarde per wijk in Amsterdam
+# Energy
+Gasverbruik per gemeente in Noord-Holland
+Elektriciteitsverbruik per gemeente
 
 # Population
-Population density by gemeente in Noord-Holland
-Bevolking per buurt in Rotterdam
+Bevolkingsdichtheid per gemeente in Friesland
+Aantal inwoners per gemeente
 
-# Income
-Inkomen per inwoner per gemeente
-Compare income across wijken in Den Haag
+# Income & housing
+Inkomen per inwoner in Land van Cuijk
+Gemiddelde WOZ-waarde per gemeente in Utrecht
 
-# Drill-down
-Zoom into Amsterdam at wijk level
-Show buurt level in Eindhoven
-
-# Selection (click a polygon, then type)
-What is the income here compared to the national average?
-Show all buurten in this gemeente
+# Compare
+Vergelijk Amsterdam met omliggende gemeenten
+Find me insights
 
 # Conversational
-What data can you show?
-What is WOZ?
+Wat betekent dit?
 Help
 ```
 
 ---
 
-## 🔌 API Reference
+## 🗂️ Data Sources
 
-### `POST /chat`
-Primary endpoint — natural language in, enriched GeoJSON out.
+### CBS StatLine — Statistics
 
-**Request**
-```json
-{
-  "message": "Show average WOZ value by buurt in Utrecht",
-  "history": []
-}
-```
+| Table ID | Description | Year |
+|----------|-------------|------|
+| `86165NED` | Kerncijfers wijken en buurten | 2025 |
+| `85984NED` | Kerncijfers wijken en buurten | 2024 |
+| `85618NED` | Kerncijfers wijken en buurten | 2023 |
 
-**Response**
-```json
-{
-  "message": "Gemiddelde WOZ-waarde per buurt in Utrecht. Bereik: 185 – 842 (96 buurten).",
-  "plan": {
-    "intent": "map_choropleth",
-    "table_id": "86165NED",
-    "measure_code": "GemiddeldeWOZWaardeVanWoningen_39",
-    "geography_level": "buurt",
-    "region_scope": "GM0344",
-    "period": "2024JJ00",
-    "classification": "quantile",
-    "n_classes": 5,
-    "message": "..."
-  },
-  "geojson": {
-    "type": "FeatureCollection",
-    "features": [...],
-    "meta": {
-      "measure_code": "GemiddeldeWOZWaardeVanWoningen_39",
-      "period": "2024JJ00",
-      "n_matched": 96,
-      "value_min": 185.0,
-      "value_max": 842.0,
-      "breaks": [185, 290, 380, 490, 620, 842],
-      "classification": "quantile"
-    }
-  },
-  "warnings": []
-}
-```
+All tables are downloaded once locally via `download_data.py`. CBS OData API is used as a fallback when a measure is not in the local DuckDB.
 
-### `GET /boundaries?level=buurt&scope=GM0344`
-Fetch PDOK geometry without CBS data (for layer toggle, fast).
+### PDOK — Boundaries
 
-### `POST /map-data`
-Execute a pre-built plan and return enriched GeoJSON.
-
-### `POST /plan`
-Generate a JSON plan from text without fetching any data.
-
-### `GET /catalog`
-List all indexed CBS geo-statistical tables.
-
-### `GET /health`
-Health check — returns `{"status": "ok"}`.
+Gemeente polygon boundaries are fetched from the PDOK OGC API on first run and cached locally in `gemeente_geo.duckdb`. All subsequent map requests read from DuckDB — no live API calls needed.
 
 ---
 
@@ -381,58 +228,39 @@ Health check — returns `{"status": "ok"}`.
 ```
 CijfersChat/
 │
-├── backend/                         # Python / FastAPI
-│   ├── app.py                       # Main application + endpoints
-│   ├── config.py                    # Settings via pydantic-settings
-│   ├── models.py                    # Pydantic request / response schemas
-│   ├── cache.py                     # In-memory TTL caches
-│   │
-│   ├── catalog_index.py             # CBS catalog indexer — table / measure lookup
-│   ├── cbs_client.py                # CBS OData v3 HTTP client + dimension detection
-│   ├── spatial_service.py           # PDOK OGC API client + client-side filtering
-│   ├── join_engine.py               # CBS DataFrame ⋈ PDOK GeoJSON + classification
-│   ├── planner.py                   # LLM intent parser → JSON plan
-│   │
-│   └── tests/
-│       ├── test_cbs_client.py       # CBS API integration tests
-│       ├── test_join_engine.py      # Join + classification unit tests
-│       └── test_planner.py         # Planner output validation
+├── backend/
+│   ├── app.py                  # FastAPI endpoints
+│   ├── planner.py              # Two-LLM pipeline (plan + narrate)
+│   ├── cbs_client.py           # CBS OData client (DuckDB-first)
+│   ├── spatial_service.py      # Geometry service (DuckDB-first → PDOK fallback)
+│   ├── duckdb_client.py        # DuckDB query layer (cijfers + spatial + geometry)
+│   ├── join_engine.py          # CBS data ⋈ geometry + classification
+│   ├── ingest.py               # Full CBS + PDOK ingest pipeline
+│   ├── download_data.py        # One-shot: download CBS CSVs + gemeente geometry
+│   ├── models.py               # Pydantic schemas
+│   ├── config.py               # Settings
+│   └── data/
+│       ├── cijfers.duckdb          # CBS statistics (long format)
+│       ├── cbs_spatial.duckdb      # CBS wide format + regions + neighbors
+│       ├── gemeente_geo.duckdb     # Gemeente polygons + ST_Touches adjacency
+│       └── geometry/
+│           └── gemeente_raw.json   # PDOK geometry disk cache
 │
-├── frontend/                        # React / TypeScript / Vite
+├── frontend/
 │   └── src/
-│       ├── App.tsx                  # Root component + layout
-│       ├── main.tsx                 # React entry point
-│       │
-│       ├── api/
-│       │   └── index.ts             # Typed backend client (fetch wrapper)
-│       │
-│       ├── store/
-│       │   └── chatStore.ts         # Zustand global state
-│       │
-│       ├── types/
-│       │   └── index.ts             # TypeScript interfaces
-│       │
-│       └── components/
-│           ├── layout/
-│           │   ├── AppShell.tsx     # Split-pane layout
-│           │   └── ThemeToggle.tsx  # Dark / light mode
-│           │
-│           ├── chat/
-│           │   ├── ChatPanel.tsx    # Scrollable message history
-│           │   ├── MessageBubble.tsx# User / assistant bubbles
-│           │   ├── PlanCard.tsx     # Collapsible JSON plan viewer
-│           │   └── InputBar.tsx     # Chat input + send button
-│           │
-│           └── map/
-│               ├── MapPanel.tsx     # MapLibre GL map + layers
-│               ├── MapControls.tsx  # Layer toggle buttons
-│               ├── MapLegend.tsx    # Choropleth legend
-│               └── MapTooltip.tsx   # Hover tooltip
+│       ├── api/client.ts       # Typed fetch wrapper
+│       ├── store/chatStore.ts  # Zustand global state
+│       ├── components/
+│       │   ├── chat/           # ChatPanel, MessageBubble, InputBar, PlanCard
+│       │   └── map/            # MapPanel, Legend, Tooltip, Controls
+│       └── types/index.ts
 │
-├── .env.example                     # Environment variable template
-├── .gitignore
-├── requirements.txt                 # Python dependencies
-└── README.md
+├── Dockerfile                  # Multi-stage: Node build + Python slim + nginx
+├── docker-compose.yml          # Local Docker with persistent data volume
+├── nginx.conf                  # Proxy /api/ → uvicorn, serve SPA static files
+├── entrypoint.sh               # Auto-bootstrap data on first container start
+├── .env.example
+└── requirements.txt
 ```
 
 ---
@@ -440,135 +268,70 @@ CijfersChat/
 ## 🔄 Data Flow
 
 ```
-1. User types a message
-       │
-       ▼
-2. POST /chat  { message, history }
-       │
-       ▼
-3. planner.py  → LLM call → JSON Plan
-   {
-     table_id: "86165NED",
-     measure_code: "GemiddeldeWOZWaardeVanWoningen_39",
-     geography_level: "buurt",
-     region_scope: "GM0344"
-   }
-       │
-       ├──────────────────────────────┐
-       ▼                              ▼
-4. cbs_client.py                 spatial_service.py
-   CBS OData v3 query            PDOK OGC API (paginated)
-   $select + $filter             Full collection → client-side filter
-   → pandas DataFrame            → GeoJSON FeatureCollection
-       │                              │
-       └──────────────┬───────────────┘
-                       ▼
-5. join_engine.py
-   df.merge(geojson on statcode)
-   Quantile / equal-interval classification
-   → Enriched GeoJSON with "value", "class", "colour"
+User message
+    │
+    ▼
+POST /api/chat
+    │
+    ▼
+planner.py → Planner LLM (temp=0) → JSON MapPlan
+    { table_id, measure_code, geography_level, region_scope, province_scope }
+    │
+    ├─────────────────────────────────────┐
+    ▼                                     ▼
+cbs_client.py                     spatial_service.py
+  1. DuckDB fast path               1. gemeente_geo.duckdb (local)
+  2. CBS OData fallback             2. disk cache fallback
+  → pandas DataFrame                3. PDOK API fallback
+    │                                     │
+    └──────────── join_engine ────────────┘
                        │
                        ▼
-6. ChatResponse  { message, plan, geojson, warnings }
+              Enriched GeoJSON + breaks + colours
                        │
+    ┌──────────────────┤
+    ▼                  ▼
+Narrator LLM     ChatResponse
+(temp=0.7)       { message, plan, geojson }
+→ message text         │
                        ▼
-7. Frontend
-   MapLibre renders choropleth
-   Legend + tooltips
-   Chat panel shows message + plan card
+                  MapLibre choropleth
 ```
 
 ---
 
-## 🧪 Running Tests
+## 🧪 Tests
 
 ```bash
 cd backend
 pytest tests/ -v
-
-# With coverage
-pytest tests/ -v --cov=. --cov-report=term-missing
-```
-
-| Test file | What it covers |
-|-----------|---------------|
-| `test_cbs_client.py` | CBS OData API connectivity + dimension detection |
-| `test_join_engine.py` | CBS/PDOK join + quantile classification |
-| `test_planner.py` | LLM plan output validation + JSON structure |
-
----
-
-## 🛠️ Development
-
-### Backend hot-reload
-```bash
-cd backend
-uvicorn app:app --reload --port 8000
-```
-
-### Frontend hot-reload
-```bash
-cd frontend
-npm run dev
-```
-
-### Lint
-```bash
-# Python
-ruff check backend/
-mypy backend/
-
-# TypeScript
-cd frontend && npm run lint
-```
-
-### Update PDOK boundaries
-Boundaries are fetched live from PDOK on every cold-cache request. To force a refresh:
-```bash
-# Restart the backend — in-memory cache is cleared
-uvicorn app:app --reload
-```
-
-Or change the target year:
-```env
-DEFAULT_GEO_YEAR=2025
 ```
 
 ---
 
-## 🤖 LLM Design Principles
+## 🐳 Docker
 
-The LLM is intentionally **narrow-scoped**:
+```bash
+# Build
+docker build -t cijferschat .
 
-| LLM **does** | LLM **does not** |
-|---|---|
-| Parse natural language intent | Fetch data from CBS or PDOK |
-| Output a structured JSON plan | Execute SQL or OData queries |
-| Select the right table + measure | Render any UI |
-| Translate to Dutch | Validate data quality |
-| Handle conversation (greeting, help) | Make statistical judgements |
+# Run (with persistent data volume)
+docker-compose up
 
-This means the system stays **deterministic and testable** — the same plan input always produces the same map, regardless of which LLM is used.
+# Force data refresh
+docker-compose run --rm app python download_data.py
+```
+
+On first start, `entrypoint.sh` automatically downloads CBS statistics (~150 MB) and builds the geometry database. Subsequent starts use the persisted volume and are instant.
 
 ---
 
 ## 🔒 Privacy & Licensing
 
-- **No user data is stored** — all queries are stateless
-- **No API keys required** for CBS or PDOK
-- CBS statistics and PDOK boundaries are published under **CC BY 4.0**
-- This project is MIT licensed — attribution appreciated
-
----
-
-## 🤝 Contributing
-
-1. Fork the repo
-2. Create a feature branch: `git checkout -b feature/my-feature`
-3. Commit your changes
-4. Push and open a Pull Request
-
-Ideas welcome: new CBS tables, better classification methods, export to CSV/PNG, multilingual support.
+- No user data is stored — all queries are stateless
+- No API keys required for CBS or PDOK data
+- CBS statistics and PDOK boundaries: **CC BY 4.0**
+- This project: **MIT**
 
 ---
 
@@ -576,14 +339,14 @@ Ideas welcome: new CBS tables, better classification methods, export to CSV/PNG,
 
 MIT © 2025 — see [LICENSE](LICENSE)
 
-Data sources: [CBS StatLine](https://opendata.cbs.nl) · [PDOK](https://pdok.nl) — CC BY 4.0
+Data: [CBS StatLine](https://opendata.cbs.nl) · [PDOK](https://pdok.nl) — CC BY 4.0
 
 ---
 
 <div align="center">
 
-Built with ❤️ for open Dutch data
+Built for open Dutch data
 
-[CBS StatLine](https://opendata.cbs.nl) · [PDOK](https://pdok.nl) · [MapLibre GL](https://maplibre.org) · [FastAPI](https://fastapi.tiangolo.com)
+[CBS StatLine](https://opendata.cbs.nl) · [PDOK](https://pdok.nl) · [MapLibre GL](https://maplibre.org) · [FastAPI](https://fastapi.tiangolo.com) · [DuckDB](https://duckdb.org)
 
 </div>
