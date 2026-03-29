@@ -1,5 +1,24 @@
 /** CBS logo + CijfersChat wordmark */
 
+interface Props {
+  size?: number
+  className?: string
+}
+
+/** CBS logo icon — used wherever the old 3×3 grid appeared */
+export function LogoIcon({ size = 32, className }: Props) {
+  return (
+    <img
+      src="/favicon.svg"
+      width={size * 3}
+      height={size}
+      alt="CBS"
+      className={className}
+      style={{ objectFit: 'contain' }}
+    />
+  )
+}
+
 /** Full wordmark: CBS logo + "Cijfers" + "Chat" */
 export function LogoWordmark({ iconSize = 28 }: { iconSize?: number }) {
   return (
