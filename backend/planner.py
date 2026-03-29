@@ -107,7 +107,7 @@ Output ONLY a single valid JSON object — no markdown, no code fences, no comme
   "intent": "map_choropleth",
   "table_id": "<one of the approved table IDs above>",
   "measure_code": "<exact column name from the measure codes list above>",
-  "geography_level": "gemeente",
+  "geography_level": "<gemeente | wijk | buurt — use wijk/buurt only for whitelisted measures above>",
   "region_scope": null,
   "province_scope": null,
   "buffer_scope": null,
@@ -355,6 +355,12 @@ Template for info intent:
    what the map shows (measure, level, location). Use the same language as the user.
    Example: "Gemiddeld inkomen per inwoner per gemeente in Rotterdam."
 7. Output ONLY the JSON object — nothing else.
+8. geography_level for wijk/buurt queries:
+   "Motorvoertuigen per buurt in Rotterdam"  → geography_level: "buurt",  region_scope: "GM0599"
+   "WOZ per wijk in Amsterdam"               → geography_level: "wijk",   region_scope: "GM0363"
+   "Bevolking per wijk in Utrecht"           → geography_level: "wijk",   region_scope: "GM0344"
+   "Gasverbruik per buurt in Den Haag"       → geography_level: "gemeente", region_scope: "GM0518"  ← gas NOT whitelisted, use gemeente
+   "Inkomen per buurt in Eindhoven"          → geography_level: "gemeente", region_scope: "GM0772"  ← income NOT whitelisted, use gemeente
 """
 
 
