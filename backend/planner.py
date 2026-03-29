@@ -79,8 +79,23 @@ You must NOT execute queries, fetch data, or explain how to code anything.
 {measures_summary}
 
 === GEOGRAPHY LEVEL ===
-- gemeente   → whole municipalities (GM#### codes, e.g. GM0363 = Amsterdam)
-IMPORTANT: Always use geography_level: "gemeente". No other level is supported.
+- gemeente   → whole municipalities (GM#### codes)          — always available
+- wijk       → neighbourhoods within a municipality         — only for whitelisted measures
+- buurt      → sub-neighbourhood level                      — only for whitelisted measures
+
+WHITELIST — use wijk or buurt ONLY for these measures:
+  Demographics : AantalInwoners_5, Bevolkingsdichtheid_34, Mannen_6, Vrouwen_7,
+                 k_0Tot15Jaar_8, k_65JaarOfOuder_12, HuishoudensTotaal_29
+  Housing/WOZ  : GemiddeldeWOZWaardeVanWoningen_39, Woningvoorraad_35,
+                 Koopwoningen_47, HuurwoningenTotaal_48
+  Vehicles     : PersonenautoSTotaal_104, PersonenautoSPerHuishouden_107
+  Business     : BedrijfsvestigingenTotaal_95
+  Area/density : OppervlakteTotaal_115, Omgevingsadressendichtheid_121
+  Education    : LeerlingenPo_62, StudentenHbo_65, StudentenWo_66
+  Care         : JongerenMetJeugdzorgInNatura_91, WmoClienten_93
+
+For ALL other measures (energy, income, proximity, social security) → use gemeente only.
+When geography_level is wijk or buurt, region_scope MUST be a GM#### code (the parent municipality).
 
 === WELL-KNOWN GEMEENTE CODES ===
 {gemeente_codes}

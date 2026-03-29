@@ -42,25 +42,49 @@ class MapPlan(BaseModel):
 
     # ── Field validators ─────────────────────────────────────────────────────
 
+    # ── Measures that have CBS data at wijk AND buurt level ──────────────────
+    # Everything else is gemeente-only (energy, income, proximity, social security).
+    _WIJK_BUURT_MEASURES: frozenset[str] = frozenset({
+        # Demographics
+        "AantalInwoners_5", "Bevolkingsdichtheid_34",
+        "Mannen_6", "Vrouwen_7", "k_0Tot15Jaar_8", "k_65JaarOfOuder_12",
+        "HuishoudensTotaal_29", "GeboorteTotaal_25", "SterfteTotaal_27",
+        # Housing & WOZ
+        "GemiddeldeWOZWaardeVanWoningen_39", "Woningvoorraad_35",
+        "Koopwoningen_47", "HuurwoningenTotaal_48",
+        # Vehicles
+        "PersonenautoSTotaal_104", "PersonenautoSPerHuishouden_107",
+        # Business
+        "BedrijfsvestigingenTotaal_95",
+        # Area / density
+        "OppervlakteTotaal_115", "Omgevingsadressendichtheid_121",
+        # Education (students/pupils)
+        "LeerlingenPo_62", "StudentenHbo_65", "StudentenWo_66",
+        # Care
+        "JongerenMetJeugdzorgInNatura_91", "WmoClienten_93",
+    })
+
     @field_validator("geography_level", mode="before")
     @classmethod
     def normalize_geography_level(cls, v: str) -> str:
-        """Normalize geography level — always gemeente (wijk/buurt reserved for future)."""
+        """Normalise synonyms; wijk/buurt pass through — model_validator enforces whitelist."""
         _synonyms: dict[str, str] = {
             "municipality": "gemeente", "municipalities": "gemeente",
             "gemeenten": "gemeente", "gemeentes": "gemeente",
-            # wijk/buurt → gemeente until sub-municipality support is re-enabled
-            "wijk": "gemeente", "wijken": "gemeente",
-            "district": "gemeente", "districts": "gemeente",
-            "buurt": "gemeente", "buurten": "gemeente",
-            "neighbourhood": "gemeente", "neighborhoods": "gemeente",
-            "neighbourhoods": "gemeente", "neighborhood": "gemeente",
+            "wijk": "wijk", "wijken": "wijk", "district": "wijk", "districts": "wijk",
+            "buurt": "buurt", "buurten": "buurt",
+            "neighbourhood": "buurt", "neighborhoods": "buurt",
+            "neighbourhoods": "buurt", "neighborhood": "buurt",
         }
-        result = _synonyms.get(str(v).strip().lower(), str(v).strip().lower())
-        # Hard clamp — even if a future value slips through, force gemeente
-        if result in ("wijk", "buurt"):
-            return "gemeente"
-        return result
+        return _synonyms.get(str(v).strip().lower(), str(v).strip().lower())
+
+    @model_validator(mode="after")
+    def clamp_geography_to_whitelist(self) -> "MapPlan":
+        """Downgrade wijk/buurt → gemeente when the measure has no sub-gemeente CBS data."""
+        if self.geography_level in ("wijk", "buurt"):
+            if self.measure_code not in self._WIJK_BUURT_MEASURES:
+                self.geography_level = "gemeente"
+        return self
 
     @field_validator("measure_code", mode="before")
     @classmethod
