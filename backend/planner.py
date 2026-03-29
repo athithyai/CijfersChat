@@ -598,6 +598,64 @@ def _apply_keyword_override(plan: "MapPlan", user_message: str) -> "MapPlan":
     return plan
 
 
+# Whitelisted measure codes that have wijk/buurt CBS data (mirrors models.py)
+_WIJK_BUURT_MEASURES: frozenset[str] = frozenset({
+    "AantalInwoners_5", "Bevolkingsdichtheid_34", "Mannen_6", "Vrouwen_7",
+    "k_0Tot15Jaar_8", "k_65JaarOfOuder_12", "HuishoudensTotaal_29",
+    "GeboorteTotaal_25", "SterfteTotaal_27",
+    "GemiddeldeWOZWaardeVanWoningen_39", "Woningvoorraad_35",
+    "Koopwoningen_47", "HuurwoningenTotaal_48",
+    "PersonenautoSTotaal_104", "PersonenautoSPerHuishouden_107",
+    "BedrijfsvestigingenTotaal_95",
+    "OppervlakteTotaal_115", "Omgevingsadressendichtheid_121",
+    "LeerlingenPo_62", "StudentenHbo_65", "StudentenWo_66",
+    "JongerenMetJeugdzorgInNatura_91", "WmoClienten_93",
+})
+
+
+def _apply_geography_override(plan: "MapPlan", user_message: str) -> "MapPlan":
+    """Force geography_level to wijk or buurt when the user explicitly requests it
+    and the current measure supports sub-gemeente data.
+
+    phi4 and other small models reliably default to 'gemeente' even when the user
+    says 'per buurt' or 'per wijk'. This deterministic post-parse fix mirrors
+    _apply_keyword_override for measure codes.
+    """
+    if plan.intent != "map_choropleth":
+        return plan
+
+    msg = f" {user_message.lower()} "
+
+    # Detect explicit sub-gemeente level request
+    wants_buurt = any(kw in msg for kw in [
+        " buurt", "per buurt", "buurtniveau", "buurtlevel",
+        "neighbourhood", "neighborhoods", "neighbourhood level",
+    ])
+    wants_wijk = any(kw in msg for kw in [
+        " wijk", "per wijk", "wijkniveau", "wijklevel",
+        " district", "districts",
+    ])
+
+    if not (wants_buurt or wants_wijk):
+        return plan  # user didn't ask for sub-gemeente level
+
+    # Only upgrade if the measure is whitelisted
+    if plan.measure_code not in _WIJK_BUURT_MEASURES:
+        return plan  # measure has no buurt/wijk CBS data → leave at gemeente
+
+    # buurt takes precedence if both keywords appear
+    target_level = "buurt" if wants_buurt else "wijk"
+
+    if plan.geography_level != target_level:
+        logger.info(
+            "Geography override: %r → geography_level '%s' (was '%s', measure='%s')",
+            user_message[:60], target_level, plan.geography_level, plan.measure_code,
+        )
+        return plan.model_copy(update={"geography_level": target_level})
+
+    return plan
+
+
 # ── Main public API ───────────────────────────────────────────────────────────
 
 async def generate_plan(
@@ -639,6 +697,9 @@ async def generate_plan(
 
             # Keyword override — fix small-model measure confusions deterministically
             plan = _apply_keyword_override(plan, message)
+
+            # Geography override — force buurt/wijk when user explicitly asked for it
+            plan = _apply_geography_override(plan, message)
 
             # Whitelist check — catch valid-but-wrong measure codes before CBS fetch
             if plan.intent == "map_choropleth" and plan.measure_code not in _VALID_MEASURE_CODES:
