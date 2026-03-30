@@ -1,21 +1,30 @@
 """Application configuration via pydantic-settings.
 
 Switch LLM providers by changing two env vars:
-  - GPT-4o  : LLM_BASE_URL=https://api.openai.com/v1  LLM_MODEL=gpt-4o
+  - GPT-4o  : LLM_BASE_URL=https://api.openai.com/v1   LLM_MODEL=gpt-4o
+  - Groq    : LLM_BASE_URL=https://api.groq.com/openai/v1  LLM_MODEL=llama-3.3-70b-versatile
   - Ollama  : LLM_BASE_URL=http://localhost:11434/v1   LLM_MODEL=llama3.2
 """
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=ROOT_DIR / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     # ── LLM (OpenAI-compatible — defaults to Ollama local) ──────────────────
     LLM_BASE_URL: str = "http://localhost:11434/v1"   # Ollama default
-    LLM_MODEL: str = "llama3.2"                        # any `ollama pull <model>`
-    LLM_API_KEY: str = "ollama"                        # Ollama ignores this value
+    LLM_MODEL: str = "llama3.2"                       # any `ollama pull <model>`
+    LLM_API_KEY: str = "ollama"                       # Ollama ignores this value
 
     # ── Data APIs ────────────────────────────────────────────────────────────
     CBS_ODATA_BASE: str = "https://opendata.cbs.nl/ODataFeed/odata"
