@@ -14,7 +14,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 
-Type a plain-language question → get an interactive choropleth map of the Netherlands
+> Type a plain-language question → get an interactive choropleth map of the Netherlands
 
 **"Gasverbruik per gemeente in Noord-Holland"**
 **"Bevolkingsdichtheid in Friesland"**
