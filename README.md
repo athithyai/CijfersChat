@@ -327,6 +327,14 @@ docker-compose run --rm app python download_data.py
 On first start, `entrypoint.sh` automatically downloads CBS statistics (~150 MB) and builds the geometry database. Subsequent starts use the persisted volume and are instant.
 
 ---
+## Demo
+
+
+https://github.com/user-attachments/assets/66caa10f-3a12-4608-82d4-16983e2fd20f
+
+
+
+---
 
 ## 🔒 Privacy & Licensing
 
