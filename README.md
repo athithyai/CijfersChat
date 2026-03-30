@@ -1,5 +1,6 @@
 <div align="center">
 
+<img src="https://cdn.cbs.nl/cdn/images/favicon.ico" width="80" height="80" alt="CBS" />
 
 # CijfersChat
 
