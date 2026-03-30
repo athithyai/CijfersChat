@@ -13,7 +13,7 @@
 [![DuckDB](https://img.shields.io/badge/DuckDB-1.1+-FFC300?style=flat)](https://duckdb.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-<br/>
+
 
 > Type a plain-language question → get an interactive choropleth map of the Netherlands
 
