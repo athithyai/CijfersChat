@@ -16,19 +16,21 @@ pinned: false
 
 ### Chat with Dutch regional statistics — on a live map
 
-[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![React](https://img.shields.io/badge/React-18-61DAFB?style=flat&logo=react&logoColor=black)](https://react.dev)
 [![MapLibre GL](https://img.shields.io/badge/MapLibre_GL-4.x-396CB2?style=flat&logo=maplibre&logoColor=white)](https://maplibre.org)
 [![DuckDB](https://img.shields.io/badge/DuckDB-1.1+-FFC300?style=flat)](https://duckdb.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-
+[![HF Spaces](https://img.shields.io/badge/🤗%20HF%20Spaces-Live%20Demo-orange)](https://huggingface.co/spaces/AthithyaLogan/CijfersChat)
 
 > Type a plain-language question → get an interactive choropleth map of the Netherlands
 
 **"Gasverbruik per gemeente in Noord-Holland"**
-**"Bevolkingsdichtheid in Friesland"**
+**"Aantal auto's per wijk in Utrecht"**
 **"Inkomen per inwoner in Land van Cuijk"**
+
+🚀 **[Live Demo on Hugging Face Spaces](https://huggingface.co/spaces/AthithyaLogan/CijfersChat)**
 
 </div>
 
@@ -36,9 +38,7 @@ pinned: false
 
 ## ✨ Demo
 
-
 https://github.com/user-attachments/assets/82ea5440-3d65-41a0-80b1-f55c292eb47d
-
 
 ---
 
@@ -47,14 +47,16 @@ https://github.com/user-attachments/assets/82ea5440-3d65-41a0-80b1-f55c292eb47d
 | | |
 |---|---|
 | 🧠 **Two-LLM pipeline** | Planner (temp=0) → structured JSON plan · Narrator (temp=0.7) → conversational reply |
-| 🗺️ **Live choropleth maps** | Gemeente level with smooth transitions and legend |
-| 📊 **CBS StatLine** | Direct OData v3 queries against official Dutch statistics |
+| 🗺️ **Live choropleth maps** | Gemeente · wijk · buurt level with smooth transitions and legend |
+| 📊 **CBS StatLine** | Direct OData queries against official Dutch statistics |
 | 🦆 **Local DuckDB pipeline** | Geometry + stats stored locally — no PDOK API calls at query time |
+| 🏘️ **Wijk & buurt support** | Sub-municipality maps for whitelisted measures (vehicles, demographics, housing, WOZ) |
 | 🏘️ **Spatial adjacency** | ST_Touches neighbor computation for buffer/compare queries |
-| 🖱️ **Interactive selection** | Click any municipality → ask follow-up questions about it |
+| 🖱️ **Interactive selection** | Click any region → ask follow-up questions about it |
 | 🌗 **Dark / light mode** | Fully themed UI |
-| 🔌 **Any OpenAI-compatible LLM** | Ollama (free, local) · OpenAI · Groq · Azure OpenAI |
+| 🔌 **Any OpenAI-compatible LLM** | Groq (default, fast) · Ollama (free, local) · OpenAI · Azure OpenAI |
 | 🐳 **Docker ready** | Single container — nginx + uvicorn, auto-bootstraps data on first run |
+| 🤗 **HF Spaces hosted** | One-click deploy on Hugging Face Spaces |
 
 ---
 
@@ -89,7 +91,13 @@ https://github.com/user-attachments/assets/82ea5440-3d65-41a0-80b1-f55c292eb47d
 
 ## 🚀 Quick Start
 
-### Option A — Docker (recommended)
+### Option A — Hugging Face Spaces (no setup)
+
+Visit **[https://huggingface.co/spaces/AthithyaLogan/CijfersChat](https://huggingface.co/spaces/AthithyaLogan/CijfersChat)** — no install required.
+
+---
+
+### Option B — Docker (self-hosted)
 
 ```bash
 git clone https://github.com/athithyai/CijfersChat.git
@@ -98,40 +106,54 @@ cd CijfersChat
 # Copy env and set your LLM provider (see Configuration below)
 cp .env.example .env
 
-# Build and run — data is auto-downloaded on first start (~2 min)
+# Build and run — data is auto-downloaded on first start (~3 min)
 docker-compose up --build
 ```
 
-App → **http://localhost**
+App → **http://localhost:7860**
 
 > Data is persisted in a Docker volume — subsequent starts are instant.
 
 ---
 
-### Option B — Local development
+### Option C — Local development
 
 #### Prerequisites
 
 | Tool | Version |
 |------|---------|
-| Python | 3.11+ |
+| Python | 3.12+ |
 | Node.js | 20 LTS+ |
-| Ollama *(for local LLM)* | latest |
+| Groq API key *(or Ollama for local LLM)* | — |
 
 #### 1 · Clone & configure
 
 ```bash
 git clone https://github.com/athithyai/CijfersChat.git
 cd CijfersChat
-cp .env.example .env   # edit LLM settings if needed
+cp .env.example .env   # edit LLM settings
 ```
 
-#### 2 · Pull an LLM (Ollama)
+#### 2 · Set your LLM (Groq recommended — free & fast)
+
+Get a free API key at **[console.groq.com](https://console.groq.com)**, then in `.env`:
+
+```env
+LLM_BASE_URL=https://api.groq.com/openai/v1
+LLM_MODEL=llama-3.1-8b-instant
+LLM_API_KEY=gsk_...your_key...
+```
+
+Or use Ollama locally:
 
 ```bash
-ollama pull phi4          # recommended — best instruction following  ~9 GB
-# or
-ollama pull llama3.2      # smaller, faster                           ~2 GB
+ollama pull llama3.2
+```
+
+```env
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_MODEL=llama3.2
+LLM_API_KEY=ollama
 ```
 
 #### 3 · Download CBS data + geometry
@@ -139,20 +161,18 @@ ollama pull llama3.2      # smaller, faster                           ~2 GB
 ```bash
 cd backend
 pip install -r ../requirements.txt
-python download_data.py        # downloads stats CSVs + gemeente geometry
+python download_data.py        # downloads CBS stats + gemeente geometry (~150 MB)
 ```
 
 This creates:
 - `data/cijfers.duckdb` — CBS statistics (long format)
+- `data/cbs_spatial.duckdb` — CBS wide format + wijk/buurt + neighbors
 - `data/gemeente_geo.duckdb` — gemeente polygons + ST_Touches neighbor pairs
-
-> `gemeente_geo.duckdb` requires `gemeente_raw.json` to exist first.
-> Start the backend once, let it warm up geometry from PDOK, then re-run.
 
 #### 4 · Start backend
 
 ```bash
-uvicorn app:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn app:app --reload --host 0.0.0.0 --port 8000
 ```
 
 #### 5 · Start frontend
@@ -169,30 +189,29 @@ App → **http://localhost:5173**
 
 ## ⚙️ Configuration
 
-All settings in `.env`:
+All settings in `.env` (copy from `.env.example`):
 
 ```env
 # ── LLM provider ─────────────────────────────────────────────────────────────
-# Ollama (default — free, local)
-LLM_BASE_URL=http://localhost:11434/v1
-LLM_MODEL=phi4
-LLM_API_KEY=ollama
 
-# OpenAI (better accuracy, ~$0.001/query with gpt-4o-mini)
+# Groq (recommended — free tier, ~500 tok/s)
+LLM_BASE_URL=https://api.groq.com/openai/v1
+LLM_MODEL=llama-3.1-8b-instant      # or llama-3.3-70b-versatile for better quality
+LLM_API_KEY=gsk_...
+
+# Ollama (free, local — no API key needed)
+# LLM_BASE_URL=http://localhost:11434/v1
+# LLM_MODEL=llama3.2
+# LLM_API_KEY=ollama
+
+# OpenAI (best accuracy)
 # LLM_BASE_URL=https://api.openai.com/v1
-# LLM_MODEL=gpt-4o-mini
+# LLM_MODEL=gpt-4o
 # LLM_API_KEY=sk-...
 
-# Groq (free tier, very fast)
-# LLM_BASE_URL=https://api.groq.com/openai/v1
-# LLM_MODEL=llama-3.3-70b-versatile
-# LLM_API_KEY=gsk_...
-
-# ── Data APIs ────────────────────────────────────────────────────────────────
+# ── Data APIs (public, no key required) ──────────────────────────────────────
 CBS_ODATA_BASE=https://opendata.cbs.nl/ODataFeed/odata
 PDOK_OGC_BASE=https://api.pdok.nl/cbs/gebiedsindelingen/ogc/v1
-
-# ── Boundary year ─────────────────────────────────────────────────────────────
 DEFAULT_GEO_YEAR=2024
 ```
 
@@ -201,26 +220,40 @@ DEFAULT_GEO_YEAR=2024
 ## 💬 Example Queries
 
 ```
-# Energy
+# Gemeente level
 Gasverbruik per gemeente in Noord-Holland
-Elektriciteitsverbruik per gemeente
-
-# Population
 Bevolkingsdichtheid per gemeente in Friesland
-Aantal inwoners per gemeente
-
-# Income & housing
-Inkomen per inwoner in Land van Cuijk
 Gemiddelde WOZ-waarde per gemeente in Utrecht
-
-# Compare
 Vergelijk Amsterdam met omliggende gemeenten
-Find me insights
+
+# Wijk & buurt level (whitelisted measures only)
+Aantal auto's per wijk in Utrecht
+Bevolking per buurt in Rotterdam
+WOZ per wijk in Amsterdam
+Personenauto's per buurt in Den Haag
 
 # Conversational
+Inkomen per inwoner in Land van Cuijk
+Leg uit
 Wat betekent dit?
-Help
+Welke gemeente heeft het hoogste inkomen?
 ```
+
+### Wijk/buurt whitelisted measures
+
+Sub-municipality maps are available for:
+
+| Category | Measures |
+|----------|----------|
+| Demographics | Inwoners, bevolkingsdichtheid, mannen/vrouwen, leeftijdsgroepen, huishoudens |
+| Housing/WOZ | WOZ-waarde, woningvoorraad, koop/huurwoningen |
+| Vehicles | Personenauto's totaal, auto's per huishouden |
+| Business | Bedrijfsvestigingen |
+| Area | Oppervlakte, omgevingsadressendichtheid |
+| Education | Leerlingen PO, HBO, WO studenten |
+| Care | Jeugdzorg, WMO-cliënten |
+
+All other measures (energy, income, social benefits, proximity) are at gemeente level only.
 
 ---
 
@@ -234,11 +267,11 @@ Help
 | `85984NED` | Kerncijfers wijken en buurten | 2024 |
 | `85618NED` | Kerncijfers wijken en buurten | 2023 |
 
-All tables are downloaded once locally via `download_data.py`. CBS OData API is used as a fallback when a measure is not in the local DuckDB.
+Downloaded once locally via `download_data.py`. CBS OData API used as fallback when a measure is not in local DuckDB.
 
 ### PDOK — Boundaries
 
-Gemeente polygon boundaries are fetched from the PDOK OGC API on first run and cached locally in `gemeente_geo.duckdb`. All subsequent map requests read from DuckDB — no live API calls needed.
+Gemeente/wijk/buurt polygon boundaries from the PDOK OGC API — cached locally on first run. All subsequent map requests read from disk/DuckDB, no live API calls needed.
 
 ---
 
@@ -257,13 +290,15 @@ CijfersChat/
 │   ├── ingest.py               # Full CBS + PDOK ingest pipeline
 │   ├── download_data.py        # One-shot: download CBS CSVs + gemeente geometry
 │   ├── models.py               # Pydantic schemas
-│   ├── config.py               # Settings
+│   ├── config.py               # Settings (pydantic-settings, reads .env)
 │   └── data/
 │       ├── cijfers.duckdb          # CBS statistics (long format)
 │       ├── cbs_spatial.duckdb      # CBS wide format + regions + neighbors
 │       ├── gemeente_geo.duckdb     # Gemeente polygons + ST_Touches adjacency
 │       └── geometry/
-│           └── gemeente_raw.json   # PDOK geometry disk cache
+│           ├── gemeente_raw.json   # PDOK gemeente geometry cache
+│           ├── wijk_raw.json       # PDOK wijk geometry cache
+│           └── buurt_raw.json      # PDOK buurt geometry cache
 │
 ├── frontend/
 │   └── src/
@@ -272,13 +307,13 @@ CijfersChat/
 │       ├── components/
 │       │   ├── chat/           # ChatPanel, MessageBubble, InputBar, PlanCard
 │       │   └── map/            # MapPanel, Legend, Tooltip, Controls
-│       └── types/index.ts
+│       └── types/index.ts      # Shared TypeScript types
 │
 ├── Dockerfile                  # Multi-stage: Node build + Python slim + nginx
-├── docker-compose.yml          # Local Docker with persistent data volume
-├── nginx.conf                  # Proxy /api/ → uvicorn, serve SPA static files
-├── entrypoint.sh               # Auto-bootstrap data on first container start
-├── .env.example
+├── docker-compose.yml          # Local Docker — port 7860, persistent data volume
+├── nginx.conf                  # Proxy /api/ → uvicorn · serve SPA · port 7860
+├── entrypoint.sh               # Auto-bootstrap CBS data on first container start
+├── .env.example                # All config options documented
 └── requirements.txt
 ```
 
@@ -319,29 +354,56 @@ Narrator LLM     ChatResponse
 
 ---
 
+## 🐳 Docker
+
+```bash
+# Build and run
+docker-compose up --build
+
+# Force data refresh
+docker-compose run --rm app python download_data.py
+
+# Run without compose
+docker build -t cijferschat .
+docker run -p 7860:7860 --env-file .env cijferschat
+```
+
+App → **http://localhost:7860**
+
+On first start, `entrypoint.sh` automatically downloads CBS statistics (~150 MB) and builds the geometry database. Subsequent starts use the persisted volume and are instant.
+
+---
+
+## 🤗 Hugging Face Spaces
+
+The app is deployed at **[huggingface.co/spaces/AthithyaLogan/CijfersChat](https://huggingface.co/spaces/AthithyaLogan/CijfersChat)**.
+
+To deploy your own Space:
+
+```bash
+# Add HF remote
+git remote add hf https://huggingface.co/spaces/<your-username>/CijfersChat
+
+# Push
+git push hf master:main
+```
+
+Set these as **Space secrets** in Settings → Variables and secrets:
+
+| Key | Value |
+|-----|-------|
+| `LLM_API_KEY` | `gsk_...` (Groq) |
+| `LLM_BASE_URL` | `https://api.groq.com/openai/v1` |
+| `LLM_MODEL` | `llama-3.1-8b-instant` |
+
+---
+
 ## 🧪 Tests
 
 ```bash
 cd backend
 pytest tests/ -v
 ```
-
----
-
-## 🐳 Docker
-
-```bash
-# Build
-docker build -t cijferschat .
-
-# Run (with persistent data volume)
-docker-compose up
-
-# Force data refresh
-docker-compose run --rm app python download_data.py
-```
-
-On first start, `entrypoint.sh` automatically downloads CBS statistics (~150 MB) and builds the geometry database. Subsequent starts use the persisted volume and are instant.
 
 ---
 
@@ -366,6 +428,6 @@ Data: [CBS StatLine](https://opendata.cbs.nl) · [PDOK](https://pdok.nl) — CC 
 
 Built for open Dutch data with ❤️
 
-[CBS StatLine](https://opendata.cbs.nl) · [PDOK](https://pdok.nl) · [MapLibre GL](https://maplibre.org) · [FastAPI](https://fastapi.tiangolo.com) · [DuckDB](https://duckdb.org)
+[CBS StatLine](https://opendata.cbs.nl) · [PDOK](https://pdok.nl) · [MapLibre GL](https://maplibre.org) · [FastAPI](https://fastapi.tiangolo.com) · [DuckDB](https://duckdb.org) · [Groq](https://groq.com)
 
 </div>
