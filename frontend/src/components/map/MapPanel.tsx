@@ -51,7 +51,7 @@ export function MapPanel() {
       style: BASE_STYLE,
       center: NL_CENTER,
       zoom: NL_ZOOM,
-      attributionControl: true,
+      attributionControl: { compact: true },
     })
 
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right')
@@ -117,7 +117,6 @@ export function MapPanel() {
               ['boolean', ['feature-state', 'selected'], false], 0.95,
               ['boolean', ['feature-state', 'hover'],    false], 0.85,
               0.72],
-        'fill-opacity-transition': { duration: 200 },
       },
     })
 

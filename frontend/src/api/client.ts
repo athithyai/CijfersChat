@@ -1,6 +1,6 @@
 /** Typed fetch wrapper for the CijfersChat backend API. */
 
-import type { ChatRequest, ChatResponse, MapPlan, PlanRequest } from '../types'
+import type { ChatRequest, ChatResponse, MapPlan } from '../types'
 
 const BASE = '/api'
 
