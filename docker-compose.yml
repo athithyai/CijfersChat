@@ -2,7 +2,7 @@ services:
   app:
     build: .
     ports:
-      - "80:80"
+      - "7860:7860"
     volumes:
       - cbs_data:/app/backend/data   # persist DuckDB files across restarts
     env_file:

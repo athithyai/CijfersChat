@@ -1,3 +1,13 @@
+---
+title: CijfersChat
+emoji: 🗺️
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 <div align="center">
 
 <img src="https://cdn.cbs.nl/cdn/images/favicon.ico" width="80" height="80" alt="CBS" />
