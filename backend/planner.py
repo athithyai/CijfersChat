@@ -96,6 +96,8 @@ WHITELIST — use wijk or buurt ONLY for these measures:
 
 For ALL other measures (energy, income, proximity, social security) → use gemeente only.
 When geography_level is wijk or buurt, region_scope MUST be a GM#### code (the parent municipality).
+⚠️  NEVER use province_scope with wijk or buurt — it has no effect. Use region_scope instead.
+    "auto's per wijk in Utrecht" → geography_level: "wijk", region_scope: "GM0344" (NOT province_scope)
 
 === WELL-KNOWN GEMEENTE CODES ===
 {gemeente_codes}
@@ -347,7 +349,8 @@ Template for info intent:
 4. region_scope controls MAP SCOPE:
    - Specific city mentioned  → region_scope = that city's GM code (shows ONLY that gemeente)
    - "per municipality" / "per gemeente" / no place mentioned → region_scope = null (all Netherlands)
-   - Province mentioned → province_scope = province name, region_scope = null
+   - Province mentioned + gemeente level → province_scope = province name, region_scope = null
+   - Province mentioned + wijk/buurt level → IGNORE province, use region_scope = city GM code
    - Comparison / buffer queries → region_scope = null, use buffer_scope instead
    - [Selected region] in message: IGNORE it if user mentions any other place or says "per municipality"
 5. Default to table_id = "{default_table}" unless another approved table is clearly better.

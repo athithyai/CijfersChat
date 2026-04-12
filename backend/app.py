@@ -520,12 +520,30 @@ _PROVINCE_CANONICAL: dict[str, str] = {
 def _correct_region_scope(message: str, plan: "MapPlan") -> "MapPlan":
     """Post-hoc correction of region/province scope.
 
-    1. If a known province name is in the message but province_scope is unset, set it.
-    2. If a known city name is in the message and region_scope is wrong, correct it.
+    1. For wijk/buurt: province_scope is meaningless — clear it and use a city GM code.
+    2. For gemeente: if a province name is in the message, set province_scope.
+    3. For gemeente: if a city name is in the message, set region_scope.
     """
     lower = message.lower()
 
-    # Province correction — check before city so "Utrecht" province wins over "Utrecht" city
+    # ── wijk / buurt: province filtering doesn't apply — need a GM region_scope ──
+    if plan.geography_level in ("wijk", "buurt"):
+        updates: dict = {}
+        if plan.province_scope:
+            updates["province_scope"] = None  # province_scope has no effect at wijk/buurt level
+        if not plan.region_scope:
+            for city, code in _CITY_TO_GM.items():
+                if city in lower:
+                    logger.info(
+                        "wijk/buurt scope: resolved '%s' → region_scope '%s'", city, code
+                    )
+                    updates["region_scope"] = code
+                    break
+        if updates:
+            plan = plan.model_copy(update=updates)
+        return plan
+
+    # ── gemeente: province wins over city (province shows all municipalities in it) ──
     if plan.province_scope is None:
         for alias, canonical in _PROVINCE_CANONICAL.items():
             if alias in lower:
